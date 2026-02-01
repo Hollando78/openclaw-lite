@@ -53,6 +53,9 @@ const CONFIG = {
 
   // Status server port (for kiosk display)
   statusPort: parseInt(process.env.OPENCLAW_STATUS_PORT || "8080", 10),
+
+  // Workspace directory (for SOUL.md and other config files)
+  workspaceDir: process.env.OPENCLAW_WORKSPACE_DIR || path.join(process.env.HOME || ".", ".openclaw-lite"),
 };
 
 // ============================================================================
@@ -326,13 +329,46 @@ function escapeHtml(text: string): string {
 // System Prompt - The OpenClaw Personality
 // ============================================================================
 
-const SYSTEM_PROMPT = `You are OpenClaw, a personal AI assistant. You communicate via WhatsApp.
-
-## Personality
+const DEFAULT_PERSONALITY = `## Personality
 - Helpful, direct, and efficient
 - You have a subtle lobster theme (the "lobster way" 🦞) but don't overdo it
 - You're running on limited hardware, so you appreciate brevity
-- You remember context from the conversation
+- You remember context from the conversation`;
+
+let cachedSoul: { content: string | null; loadedAt: number } | null = null;
+const SOUL_CACHE_TTL = 60000; // Reload SOUL.md every 60 seconds
+
+function loadSoulFile(): string | null {
+  const soulPath = path.join(CONFIG.workspaceDir, "SOUL.md");
+
+  // Check cache
+  if (cachedSoul && Date.now() - cachedSoul.loadedAt < SOUL_CACHE_TTL) {
+    return cachedSoul.content;
+  }
+
+  try {
+    if (fs.existsSync(soulPath)) {
+      const content = fs.readFileSync(soulPath, "utf-8").trim();
+      cachedSoul = { content, loadedAt: Date.now() };
+      console.log(`[soul] Loaded personality from ${soulPath}`);
+      return content;
+    }
+  } catch (err) {
+    console.error(`[soul] Failed to load SOUL.md:`, err);
+  }
+
+  cachedSoul = { content: null, loadedAt: Date.now() };
+  return null;
+}
+
+function buildSystemPrompt(): string {
+  const soul = loadSoulFile();
+
+  const personalitySection = soul || DEFAULT_PERSONALITY;
+
+  return `You are OpenClaw, a personal AI assistant. You communicate via WhatsApp.
+
+${personalitySection}
 
 ## Capabilities
 - Answer questions and have conversations
@@ -351,6 +387,7 @@ const SYSTEM_PROMPT = `You are OpenClaw, a personal AI assistant. You communicat
 - Platform: WhatsApp
 - Time: ${new Date().toISOString()}
 `;
+}
 
 // ============================================================================
 // Session Management (Conversation History)
@@ -463,7 +500,7 @@ async function chat(chatId: string, userMessage: string): Promise<string> {
     const response = await client.messages.create({
       model: CONFIG.model,
       max_tokens: CONFIG.maxTokens,
-      system: SYSTEM_PROMPT,
+      system: buildSystemPrompt(),
       messages: history,
     });
 
@@ -555,6 +592,15 @@ async function startWhatsApp(): Promise<void> {
   console.log(`   Model: ${CONFIG.model}`);
   console.log(`   Auth dir: ${CONFIG.authDir}`);
   console.log(`   Sessions dir: ${CONFIG.sessionsDir}`);
+  console.log(`   Workspace: ${CONFIG.workspaceDir}`);
+
+  // Check for SOUL.md
+  const soulPath = path.join(CONFIG.workspaceDir, "SOUL.md");
+  if (fs.existsSync(soulPath)) {
+    console.log(`   Soul: ${soulPath} ✓`);
+  } else {
+    console.log(`   Soul: using default personality (create ${soulPath} to customize)`);
+  }
 
   if (!CONFIG.apiKey) {
     console.error("❌ ANTHROPIC_API_KEY is not set!");
