@@ -11,9 +11,6 @@
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
-  WASocket,
-  proto,
-  downloadMediaMessage,
 } from "@whiskeysockets/baileys";
 import Anthropic from "@anthropic-ai/sdk";
 import * as qrcode from "qrcode-terminal";
@@ -46,7 +43,11 @@ const CONFIG = {
   maxHistory: parseInt(process.env.OPENCLAW_MAX_HISTORY || "50", 10),
 
   // Allowed numbers (empty = allow all, comma-separated E.164 numbers)
-  allowList: (process.env.OPENCLAW_ALLOW_LIST || "").split(",").filter(Boolean),
+  // Pre-compute digits for faster matching
+  allowList: (process.env.OPENCLAW_ALLOW_LIST || "")
+    .split(",")
+    .filter(Boolean)
+    .map((n) => n.replace(/[^0-9]/g, "")),
 
   // Owner number (for admin commands)
   ownerNumber: process.env.OPENCLAW_OWNER || "",
@@ -340,26 +341,26 @@ let cachedSoul: { content: string | null; loadedAt: number } | null = null;
 const SOUL_CACHE_TTL = 60000; // Reload SOUL.md every 60 seconds
 
 function loadSoulFile(): string | null {
-  const soulPath = path.join(CONFIG.workspaceDir, "SOUL.md");
-
-  // Check cache
+  // Check cache first
   if (cachedSoul && Date.now() - cachedSoul.loadedAt < SOUL_CACHE_TTL) {
     return cachedSoul.content;
   }
 
-  try {
-    if (fs.existsSync(soulPath)) {
-      const content = fs.readFileSync(soulPath, "utf-8").trim();
-      cachedSoul = { content, loadedAt: Date.now() };
-      console.log(`[soul] Loaded personality from ${soulPath}`);
-      return content;
-    }
-  } catch (err) {
-    console.error(`[soul] Failed to load SOUL.md:`, err);
-  }
+  const soulPath = path.join(CONFIG.workspaceDir, "SOUL.md");
 
-  cachedSoul = { content: null, loadedAt: Date.now() };
-  return null;
+  try {
+    // Try to read directly - avoids double FS call
+    const content = fs.readFileSync(soulPath, "utf-8").trim();
+    cachedSoul = { content, loadedAt: Date.now() };
+    console.log(`[soul] Loaded personality from ${soulPath}`);
+    return content;
+  } catch (err: any) {
+    if (err.code !== "ENOENT") {
+      console.error(`[soul] Failed to load SOUL.md:`, err);
+    }
+    cachedSoul = { content: null, loadedAt: Date.now() };
+    return null;
+  }
 }
 
 function buildSystemPrompt(): string {
@@ -406,10 +407,25 @@ type Session = {
 };
 
 const sessions = new Map<string, Session>();
+const pendingSaves = new Set<string>();
+const MAX_CACHED_SESSIONS = 20; // Limit memory usage
 
 function getSessionPath(chatId: string): string {
   const safeId = chatId.replace(/[^a-zA-Z0-9]/g, "_");
   return path.join(CONFIG.sessionsDir, `${safeId}.json`);
+}
+
+function evictOldSessions(): void {
+  if (sessions.size <= MAX_CACHED_SESSIONS) return;
+
+  // Find and remove least recently used sessions
+  const sorted = [...sessions.entries()].sort(
+    (a, b) => a[1].lastActivity - b[1].lastActivity
+  );
+  const toEvict = sorted.slice(0, sessions.size - MAX_CACHED_SESSIONS);
+  for (const [chatId] of toEvict) {
+    sessions.delete(chatId);
+  }
 }
 
 function loadSession(chatId: string): Session {
@@ -421,25 +437,35 @@ function loadSession(chatId: string): Session {
   let session: Session = { messages: [], lastActivity: Date.now() };
 
   try {
-    if (fs.existsSync(sessionPath)) {
-      const data = fs.readFileSync(sessionPath, "utf-8");
-      session = JSON.parse(data);
+    // Try to read directly, catch ENOENT - avoids double FS call
+    const data = fs.readFileSync(sessionPath, "utf-8");
+    session = JSON.parse(data);
+  } catch (err: any) {
+    if (err.code !== "ENOENT") {
+      console.error(`[session] Failed to load session for ${chatId}:`, err);
     }
-  } catch (err) {
-    console.error(`[session] Failed to load session for ${chatId}:`, err);
   }
 
   sessions.set(chatId, session);
+  evictOldSessions();
   return session;
 }
 
 function saveSession(chatId: string, session: Session): void {
-  try {
-    fs.mkdirSync(CONFIG.sessionsDir, { recursive: true });
-    fs.writeFileSync(getSessionPath(chatId), JSON.stringify(session, null, 2));
-  } catch (err) {
-    console.error(`[session] Failed to save session for ${chatId}:`, err);
-  }
+  // Debounce: schedule save if not already pending
+  if (pendingSaves.has(chatId)) return;
+
+  pendingSaves.add(chatId);
+  setTimeout(() => {
+    pendingSaves.delete(chatId);
+    try {
+      fs.mkdirSync(CONFIG.sessionsDir, { recursive: true });
+      // Compact JSON - no pretty printing to save space
+      fs.writeFileSync(getSessionPath(chatId), JSON.stringify(session));
+    } catch (err) {
+      console.error(`[session] Failed to save session for ${chatId}:`, err);
+    }
+  }, 1000); // Debounce 1 second
 }
 
 function addToSession(chatId: string, role: "user" | "assistant", content: string): void {
@@ -462,13 +488,13 @@ function getConversationHistory(chatId: string): Array<{ role: "user" | "assista
 
 function clearSession(chatId: string): void {
   sessions.delete(chatId);
+  pendingSaves.delete(chatId); // Cancel any pending save
   try {
-    const sessionPath = getSessionPath(chatId);
-    if (fs.existsSync(sessionPath)) {
-      fs.unlinkSync(sessionPath);
+    fs.unlinkSync(getSessionPath(chatId));
+  } catch (err: any) {
+    if (err.code !== "ENOENT") {
+      console.error(`[session] Failed to clear session for ${chatId}:`, err);
     }
-  } catch (err) {
-    console.error(`[session] Failed to clear session for ${chatId}:`, err);
   }
 }
 
@@ -578,12 +604,8 @@ function isAllowed(senderId: string): boolean {
   // Extract just the digits from sender ID (remove @s.whatsapp.net suffix and any non-digits)
   const senderDigits = senderId.replace(/@.*$/, "").replace(/[^0-9]/g, "");
 
-  return CONFIG.allowList.some((allowed) => {
-    // Extract just digits from allowlist entry
-    const allowedDigits = allowed.replace(/[^0-9]/g, "");
-    // Exact match only - no partial matching
-    return senderDigits === allowedDigits;
-  });
+  // Allowlist is pre-computed to digits at startup
+  return CONFIG.allowList.includes(senderDigits);
 }
 
 // ============================================================================
@@ -633,17 +655,14 @@ async function startWhatsApp(): Promise<void> {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      console.log("\n📱 Scan this QR code with WhatsApp:\n");
-      qrcode.generate(qr, { small: true });
-      console.log("\n");
-
-      // Store QR for kiosk display
+      // Generate QR once, use for both terminal and kiosk
       status.state = "qr";
-      let qrText = "";
-      qrcode.generate(qr, { small: true }, (code: string) => {
-        qrText = code;
+      qrcode.generate(qr, { small: true }, (qrText: string) => {
+        status.qrCode = qrText;
+        console.log("\n📱 Scan this QR code with WhatsApp:\n");
+        console.log(qrText);
+        console.log("\n");
       });
-      status.qrCode = qrText;
     }
 
     if (connection === "close") {
