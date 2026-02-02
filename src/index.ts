@@ -13,7 +13,7 @@ import makeWASocket, {
   useMultiFileAuthState,
 } from "@whiskeysockets/baileys";
 import Anthropic from "@anthropic-ai/sdk";
-import * as qrcode from "qrcode-terminal";
+import qrcode from "qrcode-terminal";
 import * as fs from "fs";
 import * as path from "path";
 import * as http from "http";
@@ -54,6 +54,9 @@ const CONFIG = {
 
   // Status server port (for kiosk display)
   statusPort: parseInt(process.env.OPENCLAW_STATUS_PORT || "8080", 10),
+
+  // Status server bind address (127.0.0.1 for local only, 0.0.0.0 for all interfaces)
+  statusBind: process.env.OPENCLAW_STATUS_BIND || "127.0.0.1",
 
   // Workspace directory (for SOUL.md and other config files)
   workspaceDir: process.env.OPENCLAW_WORKSPACE_DIR || path.join(process.env.HOME || ".", ".openclaw-lite"),
@@ -553,7 +556,12 @@ function formatUptime(): string {
 // Status Server (for kiosk display)
 // ============================================================================
 
+let statusServerStarted = false;
+
 function startStatusServer() {
+  if (statusServerStarted) return; // Only start once
+  statusServerStarted = true;
+
   const server = http.createServer((req, res) => {
     if (req.url === "/api/status") {
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -583,8 +591,9 @@ function startStatusServer() {
   });
 
   // Bind to localhost only - never expose to network
-  server.listen(CONFIG.statusPort, "127.0.0.1", () => {
-    console.log(`🖥️  Kiosk status page: http://localhost:${CONFIG.statusPort}`);
+  server.listen(CONFIG.statusPort, CONFIG.statusBind, () => {
+    const host = CONFIG.statusBind === "0.0.0.0" ? "your-ip" : "localhost";
+    console.log(`🖥️  Kiosk status page: http://${host}:${CONFIG.statusPort}`);
   });
 }
 
