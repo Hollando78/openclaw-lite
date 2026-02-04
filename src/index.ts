@@ -11,6 +11,8 @@
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
+  downloadMediaMessage,
+  type WAMessage,
 } from "@whiskeysockets/baileys";
 import Anthropic from "@anthropic-ai/sdk";
 import qrcode from "qrcode-terminal";
@@ -647,6 +649,24 @@ function escapeHtml(text: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+// ============================================================================
+// Image Processing
+// ============================================================================
+
+type ImageContent = { data: string; mimeType: string };
+
+async function downloadImage(msg: WAMessage): Promise<ImageContent | null> {
+  try {
+    const buffer = await downloadMediaMessage(msg, "buffer", {});
+    const mimeType = msg.message?.imageMessage?.mimetype || "image/jpeg";
+    const base64 = (buffer as Buffer).toString("base64");
+    return { data: base64, mimeType };
+  } catch (err) {
+    console.error("[image] Failed to download:", err);
+    return null;
+  }
 }
 
 // ============================================================================
@@ -2082,7 +2102,7 @@ function getClient(): Anthropic {
   return anthropic;
 }
 
-async function chat(chatId: string, userMessage: string): Promise<string> {
+async function chat(chatId: string, userMessage: string, image?: ImageContent): Promise<string> {
   const client = getClient();
 
   // Get budget-aware parameters
@@ -2098,8 +2118,8 @@ async function chat(chatId: string, userMessage: string): Promise<string> {
     return "🦎 I'm running in offline mode (no API key). I can handle quick stuff like greetings, time, reminders - but for real conversations, set ANTHROPIC_API_KEY!";
   }
 
-  // Add user message to history
-  addToSession(chatId, "user", userMessage);
+  // Add user message to history (text representation only)
+  addToSession(chatId, "user", userMessage || "[Image]");
 
   // Get conversation history (respecting budget-aware limits)
   let history = getConversationHistory(chatId);
@@ -2116,11 +2136,36 @@ async function chat(chatId: string, userMessage: string): Promise<string> {
   lizardBrain.proactive.idleSince = Date.now();
 
   try {
+    // Build message content (text-only or with image for vision)
+    let currentContent: Anthropic.MessageParam["content"];
+    if (image) {
+      currentContent = [
+        {
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: image.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
+            data: image.data,
+          },
+        },
+        { type: "text", text: userMessage || "What's in this image?" },
+      ];
+    } else {
+      currentContent = userMessage;
+    }
+
+    // Build messages: history (text only) + current message (may have image)
+    const historyMessages = history.slice(0, -1); // Exclude current (already added to session)
+    const messages: Anthropic.MessageParam[] = [
+      ...historyMessages,
+      { role: "user", content: currentContent },
+    ];
+
     const response = await client.messages.create({
       model: budgetParams.model,
       max_tokens: budgetParams.maxTokens,
       system: buildSystemPrompt(),
-      messages: history,
+      messages,
     });
 
     // Track token usage
@@ -2372,18 +2417,24 @@ async function startWhatsApp(): Promise<void> {
         continue;
       }
 
-      // Extract text content
+      // Extract text and/or image content
+      const imageMessage = msg.message?.imageMessage;
       const text =
         msg.message.conversation ||
         msg.message.extendedTextMessage?.text ||
+        imageMessage?.caption ||  // Image caption
         "";
 
-      if (!text) continue;
+      // Check if this is an image message
+      const hasImage = !!imageMessage;
+
+      // Skip if no text AND no image
+      if (!text && !hasImage) continue;
 
       status.messagesReceived++;
       status.lastMessage = {
         from: senderId.replace(/@.*$/, ""),
-        preview: text.slice(0, 50) + (text.length > 50 ? "..." : ""),
+        preview: hasImage ? "[Image] " + text.slice(0, 40) : text.slice(0, 50) + (text.length > 50 ? "..." : ""),
         time: Date.now(),
       };
 
@@ -2391,14 +2442,29 @@ async function startWhatsApp(): Promise<void> {
       status.activity = "receiving";
       status.activityUntil = Date.now() + 2000;
 
-      console.log(`[message] ${senderId}: ${text.slice(0, 50)}${text.length > 50 ? "..." : ""}`);
+      console.log(`[message] ${senderId}: ${hasImage ? "[Image] " : ""}${text.slice(0, 50)}${text.length > 50 ? "..." : ""}`);
 
       try {
         let response: string;
         let skippedApi = false;
 
-        // Check for commands
-        if (isCommand(text)) {
+        // Download image if present
+        let imageContent: ImageContent | undefined;
+        if (hasImage) {
+          console.log(`[image] Downloading image from ${senderId}`);
+          const downloaded = await downloadImage(msg);
+          if (downloaded) {
+            imageContent = downloaded;
+            console.log(`[image] Downloaded ${(downloaded.data.length / 1024).toFixed(1)}KB`);
+          } else {
+            // Failed to download, respond with error
+            await sock.sendMessage(chatId, { text: "🦞 Sorry, I couldn't process that image." });
+            continue;
+          }
+        }
+
+        // Check for commands (skip images for commands)
+        if (isCommand(text) && !hasImage) {
           const cmdResponse = handleCommand(chatId, senderId, text);
           if (cmdResponse) {
             response = cmdResponse;
@@ -2409,8 +2475,8 @@ async function startWhatsApp(): Promise<void> {
             status.activityUntil = Date.now() + 30000;
             response = await chat(chatId, text);
           }
-        } else {
-          // Check lizard-brain quick patterns first
+        } else if (!hasImage) {
+          // Check lizard-brain quick patterns first (text only, no images)
           const quickResponse = tryQuickResponse(chatId, text);
           if (quickResponse) {
             response = quickResponse;
@@ -2422,6 +2488,11 @@ async function startWhatsApp(): Promise<void> {
             status.activityUntil = Date.now() + 30000;
             response = await chat(chatId, text);
           }
+        } else {
+          // Image message - always use Claude API for vision
+          status.activity = "thinking";
+          status.activityUntil = Date.now() + 30000;
+          response = await chat(chatId, text, imageContent);
         }
 
         // Store response for "what did you say" pattern (even for quick responses)
