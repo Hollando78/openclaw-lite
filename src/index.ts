@@ -530,6 +530,9 @@ const status = {
   messagesSent: 0,
   lastMessage: null as { from: string; preview: string; time: number } | null,
   errors: [] as Array<{ time: number; message: string }>,
+  // Activity tracking for avatar animations
+  activity: null as "receiving" | "thinking" | "sending" | null,
+  activityUntil: 0,
 };
 
 function addError(message: string) {
@@ -651,6 +654,12 @@ function escapeHtml(text: string): string {
 // ============================================================================
 
 function getAvatarState(): string {
+  // Check transient activity states first (with expiry)
+  if (status.activity && Date.now() < status.activityUntil) {
+    return status.activity;
+  }
+  status.activity = null; // Clear expired activity
+
   const tokenUsage = lizardBrain.tokens.used / lizardBrain.tokens.budget;
 
   // Priority-based state selection
@@ -850,6 +859,9 @@ function getAvatarStatusLabel(state: string): string {
     "exhausted": "Need to rest...",
     "disconnected": "Lost connection",
     "qr": "Ready to connect!",
+    "receiving": "Message received!",
+    "thinking": "Thinking...",
+    "sending": "Responding!",
   };
   return labels[state] || "Hello!";
 }
@@ -1390,6 +1402,95 @@ function generateKioskCSS(): string {
     @keyframes claw-hold {
       0%, 100% { transform: rotate(-5deg); }
       50% { transform: rotate(5deg); }
+    }
+
+    /* Receiving state - perked up, antenna alert */
+    [data-state="receiving"] .lobster-svg {
+      animation: receiving-perk 0.3s ease-out forwards;
+    }
+
+    [data-state="receiving"] .antennae {
+      animation: antenna-alert 0.2s ease-in-out infinite;
+    }
+
+    [data-state="receiving"] .eyes {
+      animation: eyes-widen 0.3s ease-out forwards;
+    }
+
+    @keyframes receiving-perk {
+      0% { transform: translateY(0) scale(1); }
+      100% { transform: translateY(-8px) scale(1.05); }
+    }
+
+    @keyframes antenna-alert {
+      0%, 100% { transform: rotate(-8deg); }
+      50% { transform: rotate(8deg); }
+    }
+
+    @keyframes eyes-widen {
+      0% { transform: scale(1); }
+      100% { transform: scale(1.1); }
+    }
+
+    /* Thinking state - thoughtful, claw tapping */
+    [data-state="thinking"] .lobster-svg {
+      animation: thinking-bob 1.5s ease-in-out infinite;
+    }
+
+    [data-state="thinking"] .claw-right {
+      animation: claw-tap 0.6s ease-in-out infinite;
+      transform-origin: center center;
+    }
+
+    [data-state="thinking"] .eye-pupil {
+      animation: eyes-thinking 2s ease-in-out infinite;
+    }
+
+    @keyframes thinking-bob {
+      0%, 100% { transform: translateY(0) rotate(-1deg); }
+      50% { transform: translateY(-3px) rotate(1deg); }
+    }
+
+    @keyframes claw-tap {
+      0%, 100% { transform: rotate(0deg) translateY(0); }
+      50% { transform: rotate(-15deg) translateY(3px); }
+    }
+
+    @keyframes eyes-thinking {
+      0%, 100% { transform: translateX(0); }
+      25% { transform: translateX(-2px) translateY(-1px); }
+      75% { transform: translateX(2px) translateY(-1px); }
+    }
+
+    /* Sending state - bounce, gesturing */
+    [data-state="sending"] .lobster-svg {
+      animation: sending-bounce 0.4s ease-out;
+    }
+
+    [data-state="sending"] .claw-left,
+    [data-state="sending"] .claw-right {
+      animation: claw-gesture 0.3s ease-in-out infinite;
+    }
+
+    [data-state="sending"] .mouth-smile {
+      animation: mouth-talk 0.2s ease-in-out infinite;
+    }
+
+    @keyframes sending-bounce {
+      0% { transform: translateY(0) scale(1); }
+      30% { transform: translateY(-10px) scale(1.05); }
+      60% { transform: translateY(-5px) scale(1.02); }
+      100% { transform: translateY(0) scale(1); }
+    }
+
+    @keyframes claw-gesture {
+      0%, 100% { transform: rotate(-5deg); }
+      50% { transform: rotate(10deg); }
+    }
+
+    @keyframes mouth-talk {
+      0%, 100% { transform: scaleY(1); }
+      50% { transform: scaleY(1.3); }
     }
 
     /* Status Page Styles */
@@ -2286,6 +2387,10 @@ async function startWhatsApp(): Promise<void> {
         time: Date.now(),
       };
 
+      // Set receiving activity state
+      status.activity = "receiving";
+      status.activityUntil = Date.now() + 2000;
+
       console.log(`[message] ${senderId}: ${text.slice(0, 50)}${text.length > 50 ? "..." : ""}`);
 
       try {
@@ -2300,6 +2405,8 @@ async function startWhatsApp(): Promise<void> {
             skippedApi = true;
           } else {
             // Not a recognized command, treat as regular message
+            status.activity = "thinking";
+            status.activityUntil = Date.now() + 30000;
             response = await chat(chatId, text);
           }
         } else {
@@ -2311,12 +2418,18 @@ async function startWhatsApp(): Promise<void> {
             console.log(`[lizard] Quick response (skipped API)`);
           } else {
             // Regular message - chat with Claude
+            status.activity = "thinking";
+            status.activityUntil = Date.now() + 30000;
             response = await chat(chatId, text);
           }
         }
 
         // Store response for "what did you say" pattern (even for quick responses)
         lizardBrain.lastResponses.set(chatId, response);
+
+        // Set sending activity state
+        status.activity = "sending";
+        status.activityUntil = Date.now() + 2000;
 
         // Send response
         await sock.sendMessage(chatId, { text: response });
