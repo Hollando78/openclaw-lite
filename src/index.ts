@@ -66,6 +66,9 @@ const CONFIG = {
   // Lizard-brain settings
   dailyTokenBudget: parseInt(process.env.OPENCLAW_DAILY_TOKEN_BUDGET || "100000", 10),
   lizardInterval: parseInt(process.env.OPENCLAW_LIZARD_INTERVAL || "30000", 10),
+
+  // Tavily API key for web search (optional)
+  tavilyApiKey: process.env.TAVILY_API_KEY || "",
 };
 
 // ============================================================================
@@ -666,6 +669,48 @@ async function downloadImage(msg: WAMessage): Promise<ImageContent | null> {
   } catch (err) {
     console.error("[image] Failed to download:", err);
     return null;
+  }
+}
+
+// ============================================================================
+// Web Search (Tavily)
+// ============================================================================
+
+async function webSearch(query: string): Promise<string> {
+  if (!CONFIG.tavilyApiKey) {
+    return "Web search not available (no API key configured)";
+  }
+
+  try {
+    const response = await fetch("https://api.tavily.com/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: CONFIG.tavilyApiKey,
+        query,
+        search_depth: "basic",
+        max_results: 5,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Tavily API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const results = data.results || [];
+
+    if (results.length === 0) {
+      return "No results found.";
+    }
+
+    // Format results for Claude
+    return results
+      .map((r: any, i: number) => `[${i + 1}] ${r.title}\n${r.content}\nSource: ${r.url}`)
+      .join("\n\n");
+  } catch (err) {
+    console.error("[search] Error:", err);
+    return `Search failed: ${err}`;
   }
 }
 
@@ -2102,6 +2147,24 @@ function getClient(): Anthropic {
   return anthropic;
 }
 
+// Tools for Claude (web search)
+const tools: Anthropic.Tool[] = [
+  {
+    name: "web_search",
+    description: "Search the web for current information. Use this when the user asks about recent events, news, current prices, weather, or anything that requires up-to-date information.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description: "The search query",
+        },
+      },
+      required: ["query"],
+    },
+  },
+];
+
 async function chat(chatId: string, userMessage: string, image?: ImageContent): Promise<string> {
   const client = getClient();
 
@@ -2166,13 +2229,49 @@ async function chat(chatId: string, userMessage: string, image?: ImageContent): 
       max_tokens: budgetParams.maxTokens,
       system: buildSystemPrompt(),
       messages,
+      tools: CONFIG.tavilyApiKey ? tools : undefined,
     });
 
     // Track token usage
-    const inputTokens = response.usage?.input_tokens || 0;
-    const outputTokens = response.usage?.output_tokens || 0;
-    const totalTokens = inputTokens + outputTokens;
+    let totalTokens = (response.usage?.input_tokens || 0) + (response.usage?.output_tokens || 0);
     lizardBrain.tokens.used += totalTokens;
+
+    // Handle tool use (web search)
+    let finalResponse = response;
+    while (finalResponse.stop_reason === "tool_use") {
+      const toolUse = finalResponse.content.find(
+        (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"
+      );
+
+      if (!toolUse) break;
+
+      let toolResult: string;
+      if (toolUse.name === "web_search") {
+        const query = (toolUse.input as { query: string }).query;
+        console.log(`[search] Searching: ${query}`);
+        toolResult = await webSearch(query);
+      } else {
+        toolResult = `Unknown tool: ${toolUse.name}`;
+      }
+
+      // Send tool result back to Claude
+      finalResponse = await client.messages.create({
+        model: budgetParams.model,
+        max_tokens: budgetParams.maxTokens,
+        system: buildSystemPrompt(),
+        messages: [
+          ...messages,
+          { role: "assistant", content: finalResponse.content },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: toolUse.id, content: toolResult }] },
+        ],
+        tools,
+      });
+
+      // Track additional tokens
+      const additionalTokens = (finalResponse.usage?.input_tokens || 0) + (finalResponse.usage?.output_tokens || 0);
+      totalTokens += additionalTokens;
+      lizardBrain.tokens.used += additionalTokens;
+    }
 
     // Log token usage at budget thresholds
     const usage = lizardBrain.tokens.used / lizardBrain.tokens.budget;
@@ -2187,8 +2286,8 @@ async function chat(chatId: string, userMessage: string, image?: ImageContent): 
     // Reset API error count on success
     lizardBrain.resources.apiErrors = 0;
 
-    // Extract text response
-    let assistantMessage = response.content
+    // Extract text response from final response
+    let assistantMessage = finalResponse.content
       .filter((block): block is Anthropic.TextBlock => block.type === "text")
       .map((block) => block.text)
       .join("\n");
