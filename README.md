@@ -11,6 +11,7 @@ ChadGPT (formerly OpenClaw Lite) is a stripped-down version of [OpenClaw](https:
 - Connects to WhatsApp via Baileys
 - Uses Claude (Anthropic) for intelligence
 - Handles images, documents (PDF, DOCX, text), and web search
+- Integrates with Google Drive/Docs (search, read, create, update)
 - Remembers facts about users across conversations
 - Manages calendars with scheduled digests
 - Supports group chats (responds when mentioned)
@@ -123,6 +124,8 @@ Set these in your `.env` file or as environment variables:
 | `OPENCLAW_LIZARD_INTERVAL` | No | `30000` | Lizard-brain loop interval (ms) |
 | `OPENCLAW_TIMEZONE` | No | *(system)* | Timezone override (e.g. `America/New_York`) |
 | `TAVILY_API_KEY` | No | - | Tavily API key for web search |
+| `GOOGLE_CLIENT_ID` | No | - | Google OAuth2 client ID for Drive |
+| `GOOGLE_CLIENT_SECRET` | No | - | Google OAuth2 client secret for Drive |
 
 ## Commands
 
@@ -150,6 +153,13 @@ Send these to the bot in WhatsApp:
 | `/event digest weekly Day HH:MM` | Set weekly digest time |
 | `/skip` | Cancel pending contact tagging |
 
+### Google Drive
+| Command | Description |
+|---------|-------------|
+| `/gdrive setup` | Connect Google Drive via device code flow |
+| `/gdrive status` | Check Drive connection status |
+| `/gdrive disconnect` | Disconnect Google Drive |
+
 ## Features
 
 ### Image Understanding
@@ -163,6 +173,20 @@ Send documents directly in WhatsApp:
 
 ### Web Search
 When ChadGPT needs current information, it automatically searches the web using Tavily. Requires `TAVILY_API_KEY` in your `.env` file.
+
+### Google Drive & Docs
+Access your Google Drive through natural conversation:
+- **Search** files by name or content
+- **Read** Google Docs as plain text
+- **Create** new Google Docs with content
+- **Update** existing docs (append or replace)
+
+Setup:
+1. Create OAuth2 credentials at [Google Cloud Console](https://console.cloud.google.com/apis/credentials) (Desktop app type)
+2. Enable the Google Drive API and Google Docs API
+3. Add `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` to your `.env`
+4. Send `/gdrive setup` in WhatsApp and follow the device code flow
+5. Token is saved to `~/.openclaw-lite/google-token.json` and persists across restarts
 
 ### Long-Term Memory
 ChadGPT remembers facts about you across conversations:
@@ -291,6 +315,7 @@ src/
   kiosk.ts          # Kiosk UI: HTTP server, SSE, avatar SVG, status page, CSS, JS, sounds
   lizard-brain.ts   # Mood system, quick responses, token budget, reminders, background loop
   calendar.ts       # Events, digests, vCard parsing, contact tagging
+  gdrive.ts         # Google Drive/Docs: OAuth2 device flow, REST API, CRUD operations
 ```
 
 ## Resource Usage
@@ -397,6 +422,7 @@ ps aux | grep node
 | Image understanding | Yes | Yes |
 | Document processing | No | Yes |
 | Web search | Yes | Yes |
+| Google Drive/Docs | No | Yes |
 | Calendar & events | No | Yes |
 | Group chat support | No | Yes |
 | Kiosk mode | No | Yes |

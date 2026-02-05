@@ -33,6 +33,12 @@ import {
   DAY_NAMES_SHORT, DAY_NAMES_FULL, DAY_MAP,
   type CalendarEvent, type CalendarData,
 } from "./calendar.js";
+import {
+  initGDrive, startDeviceCodeFlow, pollForToken, isConnected,
+  getConnectionStatus, clearToken, searchFiles, listFiles,
+  readDocAsText, createDoc, updateDoc, extractFileId,
+  type DriveFile,
+} from "./gdrive.js";
 
 // ============================================================================
 // Configuration
@@ -82,6 +88,10 @@ const CONFIG = {
 
   // Tavily API key for web search (optional)
   tavilyApiKey: process.env.TAVILY_API_KEY || "",
+
+  // Google Drive OAuth (optional)
+  googleClientId: process.env.GOOGLE_CLIENT_ID || "",
+  googleClientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
 };
 
 // Set system timezone if configured (must be before any Date usage)
@@ -348,6 +358,7 @@ ${personalitySection}
 - Provide information and explanations
 - Analyze images and documents (PDF, text files, Word .docx)
 - Search the web for current information
+- Access Google Drive (search, read, create, and update documents)
 - Set reminders ("remind me in 30 min to call mom")
 - Manage a family calendar with daily/weekly event digests
 - Be a thoughtful companion
@@ -366,6 +377,9 @@ ${personalitySection}
 - /remember - Show stored memories
 - /forget - Clear memories
 - /clear - Clear conversation history
+- /gdrive setup - Connect Google Drive
+- /gdrive status - Check Drive connection
+- /gdrive disconnect - Disconnect Drive
 
 ## Guidelines
 - Keep responses concise for mobile reading
@@ -677,23 +691,86 @@ function getClient(): Anthropic {
   return anthropic;
 }
 
-// Tools for Claude (web search)
-const tools: Anthropic.Tool[] = [
+// Tools for Claude
+const webSearchTool: Anthropic.Tool = {
+  name: "web_search",
+  description: "Search the web for current information. Use this when the user asks about recent events, news, current prices, weather, or anything that requires up-to-date information.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      query: { type: "string", description: "The search query" },
+    },
+    required: ["query"],
+  },
+};
+
+const gdriveTools: Anthropic.Tool[] = [
   {
-    name: "web_search",
-    description: "Search the web for current information. Use this when the user asks about recent events, news, current prices, weather, or anything that requires up-to-date information.",
+    name: "gdrive_search",
+    description: "Search Google Drive for files by name or content. Use when the user asks to find files in their Drive.",
     input_schema: {
       type: "object" as const,
       properties: {
-        query: {
-          type: "string",
-          description: "The search query",
-        },
+        query: { type: "string", description: "Search query (file name or content keywords)" },
       },
       required: ["query"],
     },
   },
+  {
+    name: "gdrive_list",
+    description: "List recent files in Google Drive root or a specific folder.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        folder_id: { type: "string", description: "Optional folder ID (omit for root)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "gdrive_read",
+    description: "Read the text content of a Google Doc. Use when the user asks to read, summarize, or analyze a document.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        file_id: { type: "string", description: "Google Drive file ID or URL" },
+      },
+      required: ["file_id"],
+    },
+  },
+  {
+    name: "gdrive_create_doc",
+    description: "Create a new Google Doc with a title and content.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Document title" },
+        content: { type: "string", description: "Document content (plain text)" },
+      },
+      required: ["title", "content"],
+    },
+  },
+  {
+    name: "gdrive_update_doc",
+    description: "Update an existing Google Doc by appending or replacing content.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        file_id: { type: "string", description: "Google Drive file ID or URL" },
+        content: { type: "string", description: "New content" },
+        mode: { type: "string", enum: ["append", "replace"], description: "'append' to add to end, 'replace' to overwrite" },
+      },
+      required: ["file_id", "content", "mode"],
+    },
+  },
 ];
+
+function getEnabledTools(): Anthropic.Tool[] {
+  const tools: Anthropic.Tool[] = [];
+  if (CONFIG.tavilyApiKey) tools.push(webSearchTool);
+  if (isConnected()) tools.push(...gdriveTools);
+  return tools;
+}
 
 async function chat(chatId: string, userMessage: string, media?: MediaContent): Promise<string> {
   const client = getClient();
@@ -799,12 +876,13 @@ async function chat(chatId: string, userMessage: string, media?: MediaContent): 
     // Build system prompt with memory context
     const systemPrompt = buildSystemPrompt() + buildMemoryContext(chatId);
 
+    const enabledTools = getEnabledTools();
     const response = await client.messages.create({
       model: budgetParams.model,
       max_tokens: budgetParams.maxTokens,
       system: systemPrompt,
       messages,
-      tools: CONFIG.tavilyApiKey ? tools : undefined,
+      tools: enabledTools.length > 0 ? enabledTools : undefined,
     });
 
     // Track token usage
@@ -825,6 +903,63 @@ async function chat(chatId: string, userMessage: string, media?: MediaContent): 
         const query = (toolUse.input as { query: string }).query;
         console.log(`[search] Searching: ${query}`);
         toolResult = await webSearch(query);
+      } else if (toolUse.name === "gdrive_search") {
+        if (!isConnected()) { toolResult = "Google Drive not connected. Use /gdrive setup first."; }
+        else {
+          try {
+            const { query } = toolUse.input as { query: string };
+            console.log(`[gdrive] Searching: ${query}`);
+            const files = await searchFiles(`fullText contains '${query}' or name contains '${query}'`);
+            toolResult = files.length === 0
+              ? "No files found."
+              : files.map((f: DriveFile) => `${f.name} (${f.mimeType}) - ID: ${f.id}${f.webViewLink ? ` - ${f.webViewLink}` : ""}`).join("\n");
+          } catch (err) { toolResult = `Drive search failed: ${err}`; }
+        }
+      } else if (toolUse.name === "gdrive_list") {
+        if (!isConnected()) { toolResult = "Google Drive not connected. Use /gdrive setup first."; }
+        else {
+          try {
+            const { folder_id } = toolUse.input as { folder_id?: string };
+            console.log(`[gdrive] Listing files${folder_id ? ` in folder ${folder_id}` : ""}`);
+            const files = await listFiles(folder_id);
+            toolResult = files.length === 0
+              ? "No files found."
+              : files.map((f: DriveFile) => `${f.name} (${f.mimeType}) - ID: ${f.id}${f.size ? ` - ${(Number(f.size) / 1024).toFixed(1)}KB` : ""}`).join("\n");
+          } catch (err) { toolResult = `Drive list failed: ${err}`; }
+        }
+      } else if (toolUse.name === "gdrive_read") {
+        if (!isConnected()) { toolResult = "Google Drive not connected. Use /gdrive setup first."; }
+        else {
+          try {
+            const { file_id } = toolUse.input as { file_id: string };
+            const resolvedId = extractFileId(file_id) || file_id;
+            console.log(`[gdrive] Reading doc: ${resolvedId}`);
+            let text = await readDocAsText(resolvedId);
+            if (text.length > 10000) text = text.slice(0, 10000) + "\n\n... (truncated at 10,000 chars)";
+            toolResult = text || "(empty document)";
+          } catch (err) { toolResult = `Failed to read document: ${err}`; }
+        }
+      } else if (toolUse.name === "gdrive_create_doc") {
+        if (!isConnected()) { toolResult = "Google Drive not connected. Use /gdrive setup first."; }
+        else {
+          try {
+            const { title, content } = toolUse.input as { title: string; content: string };
+            console.log(`[gdrive] Creating doc: ${title}`);
+            const result = await createDoc(title, content);
+            toolResult = `Created "${title}"\nURL: ${result.url}\nID: ${result.id}`;
+          } catch (err) { toolResult = `Failed to create document: ${err}`; }
+        }
+      } else if (toolUse.name === "gdrive_update_doc") {
+        if (!isConnected()) { toolResult = "Google Drive not connected. Use /gdrive setup first."; }
+        else {
+          try {
+            const { file_id, content, mode } = toolUse.input as { file_id: string; content: string; mode: "append" | "replace" };
+            const resolvedId = extractFileId(file_id) || file_id;
+            console.log(`[gdrive] Updating doc ${resolvedId} (${mode})`);
+            await updateDoc(resolvedId, content, mode);
+            toolResult = `Document updated (${mode}).`;
+          } catch (err) { toolResult = `Failed to update document: ${err}`; }
+        }
       } else {
         toolResult = `Unknown tool: ${toolUse.name}`;
       }
@@ -839,7 +974,7 @@ async function chat(chatId: string, userMessage: string, media?: MediaContent): 
           { role: "assistant", content: finalResponse.content },
           { role: "user", content: [{ type: "tool_result", tool_use_id: toolUse.id, content: toolResult }] },
         ],
-        tools,
+        tools: enabledTools.length > 0 ? enabledTools : undefined,
       });
 
       // Track additional tokens
@@ -928,6 +1063,9 @@ function handleCommand(chatId: string, senderId: string, text: string): string |
 /event remove <id> - Remove event
 /event tag <id> - Tag a contact
 /event digest - Set digest times
+/gdrive setup - Connect Google Drive
+/gdrive status - Check Drive connection
+/gdrive disconnect - Disconnect Drive
 /help - Show this help
 
 Just send a message to chat with me!`;
@@ -1117,6 +1255,44 @@ Running on minimal hardware 💪`;
       return "Usage: `/event add|remove|tag|digest ...`\nType `/help` for examples.";
     }
 
+    case "gdrive": {
+      const subCmd = args[0]?.toLowerCase();
+
+      if (subCmd === "setup") {
+        if (!CONFIG.googleClientId || !CONFIG.googleClientSecret) {
+          return "Google Drive not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env";
+        }
+        // Start device code flow async
+        (async () => {
+          try {
+            const flow = await startDeviceCodeFlow();
+            await sendMessageFn?.(chatId,
+              `🔗 *Google Drive Setup*\n\n` +
+              `1. Open: ${flow.url}\n` +
+              `2. Enter code: *${flow.userCode}*\n\n` +
+              `Waiting for authorization...`
+            );
+            await pollForToken(flow.deviceCode, flow.interval);
+            await sendMessageFn?.(chatId, "✅ Google Drive connected! You can now ask me to search, read, create, or update documents.");
+          } catch (err) {
+            await sendMessageFn?.(chatId, `❌ Google Drive setup failed: ${err}`);
+          }
+        })();
+        return null; // Response sent async
+      }
+
+      if (subCmd === "status") {
+        return `🔗 Google Drive: ${getConnectionStatus()}`;
+      }
+
+      if (subCmd === "disconnect") {
+        clearToken();
+        return "🔗 Google Drive disconnected.";
+      }
+
+      return "Usage:\n`/gdrive setup` - Connect Google Drive\n`/gdrive status` - Check connection\n`/gdrive disconnect` - Disconnect";
+    }
+
     case "skip":
       if (pendingContactTag.has(chatId)) {
         pendingContactTag.delete(chatId);
@@ -1174,6 +1350,12 @@ async function startWhatsApp(): Promise<void> {
 
   // Initialize calendar
   initCalendar(CONFIG.workspaceDir);
+
+  // Initialize Google Drive (if configured)
+  if (CONFIG.googleClientId && CONFIG.googleClientSecret) {
+    initGDrive({ workspaceDir: CONFIG.workspaceDir, clientId: CONFIG.googleClientId, clientSecret: CONFIG.googleClientSecret });
+    console.log(`   Google Drive: ${getConnectionStatus()}`);
+  }
 
   // Initialize lizard-brain
   initLizardBrain({
