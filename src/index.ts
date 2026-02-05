@@ -39,6 +39,14 @@ import {
   readDocAsText, createDoc, updateDoc, extractFileId,
   type DriveFile,
 } from "./gdrive.js";
+import {
+  initGitHub, isConnected as isGitHubConnected,
+  getConnectionStatus as getGitHubConnectionStatus,
+  listRepos, createRepo, listIssues, createIssue, readIssue,
+  commentOnIssue, closeIssue, listPullRequests, readFile as readGitHubFile,
+  createOrUpdateFile,
+  type GitHubRepo, type GitHubIssue, type GitHubComment, type GitHubPullRequest,
+} from "./github.js";
 
 // ============================================================================
 // Configuration
@@ -92,6 +100,10 @@ const CONFIG = {
   // Google Drive OAuth (optional)
   googleClientId: process.env.GOOGLE_CLIENT_ID || "",
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
+
+  // GitHub integration (optional)
+  githubToken: process.env.GITHUB_TOKEN || "",
+  githubOwner: process.env.GITHUB_OWNER || "",
 };
 
 // Set system timezone if configured (must be before any Date usage)
@@ -357,7 +369,7 @@ ${personalitySection}
 - Help with tasks, planning, and problem-solving
 - Provide information and explanations
 - Analyze images and documents (PDF, text files, Word .docx)
-- Search the web for current information${isConnected() ? "\n- Access Google Drive (search, read, create, and update documents)" : CONFIG.googleClientId ? "\n- Google Drive available (not yet connected - user can run /gdrive setup)" : ""}
+- Search the web for current information${isConnected() ? "\n- Access Google Drive (search, read, create, and update documents)" : CONFIG.googleClientId ? "\n- Google Drive available (not yet connected - user can run /gdrive setup)" : ""}${isGitHubConnected() ? "\n- Access GitHub (manage repos, issues, PRs, and files)" : ""}
 - Set reminders ("remind me in 30 min to call mom")
 - Manage a family calendar with daily/weekly event digests
 - Be a thoughtful companion
@@ -378,7 +390,8 @@ ${personalitySection}
 - /clear - Clear conversation history
 ${CONFIG.googleClientId ? `- /gdrive setup - Connect Google Drive
 - /gdrive status - Check Drive connection
-- /gdrive disconnect - Disconnect Drive` : ""}
+- /gdrive disconnect - Disconnect Drive` : ""}${CONFIG.githubToken ? `
+- /github status - Check GitHub connection` : ""}
 
 ## Guidelines
 - Keep responses concise for mobile reading
@@ -764,10 +777,140 @@ const gdriveTools: Anthropic.Tool[] = [
   },
 ];
 
+const githubTools: Anthropic.Tool[] = [
+  {
+    name: "github_list_repos",
+    description: "List GitHub repositories for the authenticated user.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        max_results: { type: "number", description: "Max repos to return (default 20)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "github_create_repo",
+    description: "Create a new GitHub repository.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        name: { type: "string", description: "Repository name" },
+        description: { type: "string", description: "Optional description" },
+        private: { type: "boolean", description: "Make repo private (default false)" },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "github_list_issues",
+    description: "List issues in a GitHub repository.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repo name (e.g. 'myrepo' or 'owner/repo')" },
+        state: { type: "string", enum: ["open", "closed", "all"], description: "Issue state (default 'open')" },
+      },
+      required: ["repo"],
+    },
+  },
+  {
+    name: "github_create_issue",
+    description: "Create a new issue in a GitHub repository.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repo name (e.g. 'myrepo' or 'owner/repo')" },
+        title: { type: "string", description: "Issue title" },
+        body: { type: "string", description: "Issue description (markdown)" },
+      },
+      required: ["repo", "title"],
+    },
+  },
+  {
+    name: "github_read_issue",
+    description: "Read an issue and its comments.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repo name (e.g. 'myrepo' or 'owner/repo')" },
+        issue_number: { type: "number", description: "Issue number" },
+      },
+      required: ["repo", "issue_number"],
+    },
+  },
+  {
+    name: "github_comment_issue",
+    description: "Add a comment to an existing issue.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repo name (e.g. 'myrepo' or 'owner/repo')" },
+        issue_number: { type: "number", description: "Issue number" },
+        body: { type: "string", description: "Comment text (markdown)" },
+      },
+      required: ["repo", "issue_number", "body"],
+    },
+  },
+  {
+    name: "github_close_issue",
+    description: "Close an issue.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repo name (e.g. 'myrepo' or 'owner/repo')" },
+        issue_number: { type: "number", description: "Issue number" },
+      },
+      required: ["repo", "issue_number"],
+    },
+  },
+  {
+    name: "github_list_prs",
+    description: "List pull requests in a GitHub repository.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repo name (e.g. 'myrepo' or 'owner/repo')" },
+        state: { type: "string", enum: ["open", "closed", "all"], description: "PR state (default 'open')" },
+      },
+      required: ["repo"],
+    },
+  },
+  {
+    name: "github_read_file",
+    description: "Read a file from a GitHub repository.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repo name (e.g. 'myrepo' or 'owner/repo')" },
+        file_path: { type: "string", description: "Path to file (e.g. 'README.md' or 'src/index.ts')" },
+        branch: { type: "string", description: "Branch name (default 'main')" },
+      },
+      required: ["repo", "file_path"],
+    },
+  },
+  {
+    name: "github_create_or_update_file",
+    description: "Create a new file or update an existing file in a GitHub repository.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repo name (e.g. 'myrepo' or 'owner/repo')" },
+        file_path: { type: "string", description: "Path to file" },
+        content: { type: "string", description: "File content" },
+        message: { type: "string", description: "Commit message" },
+        branch: { type: "string", description: "Branch name (default 'main')" },
+      },
+      required: ["repo", "file_path", "content", "message"],
+    },
+  },
+];
+
 function getEnabledTools(): Anthropic.Tool[] {
   const tools: Anthropic.Tool[] = [];
   if (CONFIG.tavilyApiKey) tools.push(webSearchTool);
   if (isConnected()) tools.push(...gdriveTools);
+  if (isGitHubConnected()) tools.push(...githubTools);
   return tools;
 }
 
@@ -959,6 +1102,118 @@ async function chat(chatId: string, userMessage: string, media?: MediaContent): 
             toolResult = `Document updated (${mode}).`;
           } catch (err) { toolResult = `Failed to update document: ${err}`; }
         }
+      } else if (toolUse.name === "github_list_repos") {
+        if (!isGitHubConnected()) { toolResult = "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env"; }
+        else {
+          try {
+            const { max_results } = toolUse.input as { max_results?: number };
+            console.log(`[github] Listing repos`);
+            const repos = await listRepos(max_results);
+            toolResult = repos.length === 0
+              ? "No repos found."
+              : repos.map((r: GitHubRepo) => `${r.full_name}${r.private ? " [private]" : ""} - ${r.description || "No description"}\n${r.html_url}`).join("\n\n");
+          } catch (err) { toolResult = `Failed to list repos: ${err}`; }
+        }
+      } else if (toolUse.name === "github_create_repo") {
+        if (!isGitHubConnected()) { toolResult = "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env"; }
+        else {
+          try {
+            const input = toolUse.input as { name: string; description?: string; private?: boolean };
+            console.log(`[github] Creating repo: ${input.name}`);
+            const repo = await createRepo(input.name, input.description, input.private);
+            toolResult = `Created ${repo.full_name}${repo.private ? " [private]" : ""}\n${repo.html_url}`;
+          } catch (err) { toolResult = `Failed to create repo: ${err}`; }
+        }
+      } else if (toolUse.name === "github_list_issues") {
+        if (!isGitHubConnected()) { toolResult = "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env"; }
+        else {
+          try {
+            const { repo, state } = toolUse.input as { repo: string; state?: "open" | "closed" | "all" };
+            console.log(`[github] Listing issues in ${repo}`);
+            const issues = await listIssues(repo, state);
+            toolResult = issues.length === 0
+              ? "No issues found."
+              : issues.map((i: GitHubIssue) => `#${i.number} [${i.state}] ${i.title} (by ${i.user.login})\n${i.html_url}`).join("\n\n");
+          } catch (err) { toolResult = `Failed to list issues: ${err}`; }
+        }
+      } else if (toolUse.name === "github_create_issue") {
+        if (!isGitHubConnected()) { toolResult = "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env"; }
+        else {
+          try {
+            const { repo, title, body } = toolUse.input as { repo: string; title: string; body?: string };
+            console.log(`[github] Creating issue in ${repo}: ${title}`);
+            const issue = await createIssue(repo, title, body);
+            toolResult = `Created issue #${issue.number}: ${issue.title}\n${issue.html_url}`;
+          } catch (err) { toolResult = `Failed to create issue: ${err}`; }
+        }
+      } else if (toolUse.name === "github_read_issue") {
+        if (!isGitHubConnected()) { toolResult = "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env"; }
+        else {
+          try {
+            const { repo, issue_number } = toolUse.input as { repo: string; issue_number: number };
+            console.log(`[github] Reading issue #${issue_number} in ${repo}`);
+            const { issue, comments } = await readIssue(repo, issue_number);
+            let result = `#${issue.number} [${issue.state}] ${issue.title}\nBy ${issue.user.login} on ${issue.created_at.slice(0, 10)}\n\n${issue.body || "(no description)"}`;
+            if (comments.length > 0) {
+              result += "\n\nComments:\n" + comments.map((c: GitHubComment) => `@${c.user.login} (${c.created_at.slice(0, 10)}): ${c.body}`).join("\n\n");
+            }
+            if (result.length > 5000) result = result.slice(0, 5000) + "\n\n... (truncated)";
+            toolResult = result;
+          } catch (err) { toolResult = `Failed to read issue: ${err}`; }
+        }
+      } else if (toolUse.name === "github_comment_issue") {
+        if (!isGitHubConnected()) { toolResult = "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env"; }
+        else {
+          try {
+            const { repo, issue_number, body } = toolUse.input as { repo: string; issue_number: number; body: string };
+            console.log(`[github] Commenting on issue #${issue_number} in ${repo}`);
+            await commentOnIssue(repo, issue_number, body);
+            toolResult = `Comment added to issue #${issue_number}.`;
+          } catch (err) { toolResult = `Failed to comment: ${err}`; }
+        }
+      } else if (toolUse.name === "github_close_issue") {
+        if (!isGitHubConnected()) { toolResult = "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env"; }
+        else {
+          try {
+            const { repo, issue_number } = toolUse.input as { repo: string; issue_number: number };
+            console.log(`[github] Closing issue #${issue_number} in ${repo}`);
+            await closeIssue(repo, issue_number);
+            toolResult = `Issue #${issue_number} closed.`;
+          } catch (err) { toolResult = `Failed to close issue: ${err}`; }
+        }
+      } else if (toolUse.name === "github_list_prs") {
+        if (!isGitHubConnected()) { toolResult = "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env"; }
+        else {
+          try {
+            const { repo, state } = toolUse.input as { repo: string; state?: "open" | "closed" | "all" };
+            console.log(`[github] Listing PRs in ${repo}`);
+            const prs = await listPullRequests(repo, state);
+            toolResult = prs.length === 0
+              ? "No pull requests found."
+              : prs.map((p: GitHubPullRequest) => `#${p.number} [${p.state}] ${p.title} (by ${p.user.login})\n${p.html_url}`).join("\n\n");
+          } catch (err) { toolResult = `Failed to list PRs: ${err}`; }
+        }
+      } else if (toolUse.name === "github_read_file") {
+        if (!isGitHubConnected()) { toolResult = "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env"; }
+        else {
+          try {
+            const { repo, file_path, branch } = toolUse.input as { repo: string; file_path: string; branch?: string };
+            console.log(`[github] Reading ${file_path} from ${repo}`);
+            let content = await readGitHubFile(repo, file_path, branch);
+            if (content.length > 10000) content = content.slice(0, 10000) + "\n\n... (truncated at 10,000 chars)";
+            toolResult = content || "(empty file)";
+          } catch (err) { toolResult = `Failed to read file: ${err}`; }
+        }
+      } else if (toolUse.name === "github_create_or_update_file") {
+        if (!isGitHubConnected()) { toolResult = "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env"; }
+        else {
+          try {
+            const { repo, file_path, content, message, branch } = toolUse.input as { repo: string; file_path: string; content: string; message: string; branch?: string };
+            console.log(`[github] Writing ${file_path} to ${repo}`);
+            const result = await createOrUpdateFile(repo, file_path, content, message, branch);
+            toolResult = `File ${file_path} committed.\n${result.html_url}`;
+          } catch (err) { toolResult = `Failed to write file: ${err}`; }
+        }
       } else {
         toolResult = `Unknown tool: ${toolUse.name}`;
       }
@@ -1080,6 +1335,8 @@ ${CONFIG.googleClientId ? `
 /gdrive setup - Connect Google Drive
 /gdrive status - Check connection
 /gdrive disconnect - Disconnect
+` : ""}${CONFIG.githubToken ? `*GitHub*
+/github status - Check GitHub connection
 ` : ""}
 Just send a message to chat with me!`;
 
@@ -1314,6 +1571,16 @@ Running on minimal hardware 💪`;
       return "Usage:\n`/gdrive setup` - Connect Google Drive\n`/gdrive status` - Check connection\n`/gdrive disconnect` - Disconnect";
     }
 
+    case "github": {
+      const subCmd = args[0]?.toLowerCase();
+
+      if (subCmd === "status") {
+        return `🔗 GitHub: ${getGitHubConnectionStatus()}`;
+      }
+
+      return "Usage:\n`/github status` - Check GitHub connection";
+    }
+
     case "skip":
       if (pendingContactTag.has(chatId)) {
         pendingContactTag.delete(chatId);
@@ -1376,6 +1643,12 @@ async function startWhatsApp(): Promise<void> {
   if (CONFIG.googleClientId && CONFIG.googleClientSecret) {
     initGDrive({ workspaceDir: CONFIG.workspaceDir, clientId: CONFIG.googleClientId, clientSecret: CONFIG.googleClientSecret });
     console.log(`   Google Drive: ${getConnectionStatus()}`);
+  }
+
+  // Initialize GitHub (if configured)
+  if (CONFIG.githubToken && CONFIG.githubOwner) {
+    initGitHub({ token: CONFIG.githubToken, owner: CONFIG.githubOwner });
+    console.log(`   GitHub: ${getGitHubConnectionStatus()}`);
   }
 
   // Initialize lizard-brain

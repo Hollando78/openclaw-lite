@@ -12,6 +12,7 @@ ChadGPT (formerly OpenClaw Lite) is a stripped-down version of [OpenClaw](https:
 - Uses Claude (Anthropic) for intelligence
 - Handles images, documents (PDF, DOCX, text), and web search
 - Integrates with Google Drive/Docs (search, read, create, update)
+- Manages GitHub repos, issues, PRs, and files
 - Remembers facts about users across conversations
 - Manages calendars with scheduled digests
 - Supports group chats (responds when mentioned)
@@ -126,6 +127,8 @@ Set these in your `.env` file or as environment variables:
 | `TAVILY_API_KEY` | No | - | Tavily API key for web search |
 | `GOOGLE_CLIENT_ID` | No | - | Google OAuth2 client ID for Drive |
 | `GOOGLE_CLIENT_SECRET` | No | - | Google OAuth2 client secret for Drive |
+| `GITHUB_TOKEN` | No | - | GitHub Personal Access Token |
+| `GITHUB_OWNER` | No | - | GitHub username (default for repo references) |
 
 ## Commands
 
@@ -161,6 +164,11 @@ Send these to the bot in WhatsApp:
 | `/gdrive status` | Check Drive connection status |
 | `/gdrive disconnect` | Disconnect Google Drive |
 
+### GitHub
+| Command | Description |
+|---------|-------------|
+| `/github status` | Check GitHub connection status |
+
 ## Features
 
 ### Image Understanding
@@ -188,6 +196,18 @@ Setup:
 3. Add `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` to your `.env`
 4. Send `/gdrive setup` in WhatsApp and follow the device code flow
 5. Token is saved to `~/.openclaw-lite/google-token.json` and persists across restarts
+
+### GitHub
+Manage GitHub repos, issues, PRs, and files through natural conversation:
+- **List repos** and **create new repos**
+- **List, create, read, comment on, and close issues**
+- **List pull requests**
+- **Read and create/update files** via the API
+
+Setup:
+1. Create a [Personal Access Token](https://github.com/settings/tokens) with `repo` and `read:user` scopes
+2. Add `GITHUB_TOKEN` and `GITHUB_OWNER` to your `.env`
+3. Restart the bot — no setup command needed
 
 ### Long-Term Memory
 ChadGPT remembers facts about you across conversations:
@@ -317,6 +337,7 @@ src/
   lizard-brain.ts   # Mood system, quick responses, token budget, reminders, background loop
   calendar.ts       # Events, digests, vCard parsing, contact tagging
   gdrive.ts         # Google Drive/Docs: OAuth2 device flow, REST API, CRUD operations
+  github.ts         # GitHub: REST API with PAT, repos, issues, PRs, files
 ```
 
 ## Resource Usage
@@ -424,6 +445,7 @@ ps aux | grep node
 | Document processing | No | Yes |
 | Web search | Yes | Yes |
 | Google Drive/Docs | No | Yes |
+| GitHub integration | No | Yes |
 | Calendar & events | No | Yes |
 | Group chat support | No | Yes |
 | Kiosk mode | No | Yes |
