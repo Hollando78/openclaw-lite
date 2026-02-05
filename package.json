@@ -1,7 +1,7 @@
 {
   "name": "openclaw-lite",
   "version": "1.0.0",
-  "description": "Minimal OpenClaw - WhatsApp AI assistant for low-resource devices",
+  "description": "ChadGPT - WhatsApp AI assistant for low-resource devices",
   "type": "module",
   "main": "dist/index.js",
   "bin": {

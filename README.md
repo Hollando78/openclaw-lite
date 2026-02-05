@@ -1,18 +1,20 @@
-# OpenClaw Lite
+# ChadGPT
 
 **The same lobster, smaller shell.**
 
-A minimal WhatsApp AI assistant designed for low-resource devices like the Alcatel 1C (1GB RAM, 8-16GB storage).
+A WhatsApp AI assistant designed for low-resource devices like the Alcatel 1C (1GB RAM, 8-16GB storage). Powered by Claude with a lobster personality, calendar system, long-term memory, and an animated kiosk display.
 
 ## What is this?
 
-OpenClaw Lite is a stripped-down version of [OpenClaw](https://github.com/openclaw/openclaw) that:
+ChadGPT (formerly OpenClaw Lite) is a stripped-down version of [OpenClaw](https://github.com/openclaw/openclaw) that:
 - Runs on very limited hardware (Termux on cheap Android phones)
 - Connects to WhatsApp via Baileys
 - Uses Claude (Anthropic) for intelligence
-- Maintains conversation history
-- Supports custom personality via SOUL.md
-- Includes a kiosk mode for dedicated devices
+- Handles images, documents (PDF, DOCX, text), and web search
+- Remembers facts about users across conversations
+- Manages calendars with scheduled digests
+- Supports group chats (responds when mentioned)
+- Includes an animated kiosk display with real-time updates and sound effects
 
 ## Requirements
 
@@ -119,6 +121,75 @@ Set these in your `.env` file or as environment variables:
 | `OPENCLAW_STATUS_BIND` | No | `127.0.0.1` | Bind address (`0.0.0.0` for external access) |
 | `OPENCLAW_DAILY_TOKEN_BUDGET` | No | `100000` | Daily token limit for API calls |
 | `OPENCLAW_LIZARD_INTERVAL` | No | `30000` | Lizard-brain loop interval (ms) |
+| `OPENCLAW_TIMEZONE` | No | *(system)* | Timezone override (e.g. `America/New_York`) |
+| `TAVILY_API_KEY` | No | - | Tavily API key for web search |
+
+## Commands
+
+Send these to the bot in WhatsApp:
+
+### General
+| Command | Description |
+|---------|-------------|
+| `/help` | Show available commands |
+| `/clear` or `/reset` | Clear conversation history |
+| `/status` | Show bot status (mood, tokens, uptime, reminders) |
+| `/remember` | Show stored memories about you |
+| `/forget` | Clear all stored memories |
+
+### Calendar & Events
+| Command | Description |
+|---------|-------------|
+| `/calendar` | Show all scheduled events |
+| `/event add daily HH:MM Title` | Add a daily recurring event |
+| `/event add weekly Day HH:MM Title` | Add a weekly event (Sun/Mon/Tue/Wed/Thu/Fri/Sat) |
+| `/event add once YYYY-MM-DD HH:MM Title` | Add a one-time event |
+| `/event remove <id>` | Remove an event by ID |
+| `/event tag <id>` | Tag a contact to an event (then share the contact) |
+| `/event digest daily HH:MM` | Set daily digest time |
+| `/event digest weekly Day HH:MM` | Set weekly digest time |
+| `/skip` | Cancel pending contact tagging |
+
+## Features
+
+### Image Understanding
+Send any image and ChadGPT will analyze it. Add a caption to ask specific questions about the image.
+
+### Document Processing
+Send documents directly in WhatsApp:
+- **PDF** (up to 10MB)
+- **Word** (.docx, up to 5MB) - extracted to text
+- **Text files** (up to 1MB) - .txt, .csv, .json, .xml, .html, .md, .py, .js, .ts, and more
+
+### Web Search
+When ChadGPT needs current information, it automatically searches the web using Tavily. Requires `TAVILY_API_KEY` in your `.env` file.
+
+### Long-Term Memory
+ChadGPT remembers facts about you across conversations:
+- Automatically extracts key facts (name, preferences, interests, etc.) every 10 messages
+- Summarizes older conversations to retain context
+- Use `/remember` to see what it knows and `/forget` to clear it
+- Stored per-user in `~/.openclaw-lite/memory/`
+
+### Calendar & Digests
+Schedule events and get automatic reminders:
+- Daily, weekly, or one-time events
+- Tag WhatsApp contacts to events (share their contact card)
+- **Daily digest**: Morning schedule sent to tagged users (default 07:00)
+- **Weekly digest**: Week-ahead sent on Sundays (default 18:00)
+- Past one-time events auto-cleanup
+
+### Group Chat
+ChadGPT works in group chats but only responds when mentioned:
+- @ mention the bot
+- Or say "chadgpt" or "chad" in your message
+
+### Reminders
+Set reminders with natural language:
+```
+"remind me in 30 minutes to check the oven"
+"remind me in 2 hours to call back"
+```
 
 ## Custom Personality (SOUL.md)
 
@@ -147,20 +218,34 @@ No SOUL.md? The bot uses a default lobster-themed personality.
 
 ## Kiosk Mode
 
-OpenClaw Lite includes a built-in status server for running on dedicated devices.
+ChadGPT includes an animated status dashboard for dedicated devices.
 
 1. Start the bot normally
 2. Open `http://localhost:8080` in a browser
-3. See live status: connection state, QR code, message counts, uptime
+3. Two-page swipeable interface:
+   - **Avatar page** - Animated lobster with 12 emotional states (happy, tired, stressed, curious, thinking, etc.)
+   - **Status page** - Connection status, message counts, mood bars, token budget
 
-For a dedicated kiosk setup on Android:
+### Real-Time Updates
+The kiosk uses Server-Sent Events (SSE) for live updates - no page refresh needed. Status values, mood bars, and avatar state all update in real-time.
+
+### Sound Effects
+Web Audio API synthesized sounds (no audio files):
+- Chirp on message received
+- Pop on message sent
+- Chord on connection
+- Buzz on error
+
+Toggle with the mute button (top-right corner). Preference persists across page loads.
+
+### Dedicated Kiosk Setup (Android)
 1. Install [Fully Kiosk Browser](https://www.fully-kiosk.com/) (free version works)
 2. Set it to load `http://localhost:8080`
 3. Enable kiosk mode to lock the display
 
 ## Lizard-Brain
 
-OpenClaw Lite includes a lightweight "instinct layer" that runs beneath the Claude API, providing fast responses and resource awareness.
+ChadGPT includes a lightweight "instinct layer" that runs beneath the Claude API, providing fast responses and resource awareness.
 
 ### Quick Responses (Skip API)
 
@@ -198,23 +283,15 @@ The bot tracks daily token usage and adjusts behavior to conserve resources:
 
 The budget resets at midnight.
 
-### Reminders
+## Architecture
 
-Set reminders with natural language:
 ```
-"remind me in 30 minutes to check the oven"
-"remind me in 2 hours to call back"
+src/
+  index.ts          # Core: config, sessions, memory, Claude API, commands, WhatsApp connection
+  kiosk.ts          # Kiosk UI: HTTP server, SSE, avatar SVG, status page, CSS, JS, sounds
+  lizard-brain.ts   # Mood system, quick responses, token budget, reminders, background loop
+  calendar.ts       # Events, digests, vCard parsing, contact tagging
 ```
-
-The bot will message you when the reminder is due.
-
-## Commands
-
-Send these to the bot:
-
-- `/help` - Show available commands
-- `/clear` - Clear conversation history
-- `/status` - Show bot status (includes mood, energy, stress, token usage)
 
 ## Resource Usage
 
@@ -234,7 +311,7 @@ Send these to the bot:
 | Item | Size |
 |------|------|
 | node_modules | ~100MB |
-| Application code | ~30KB |
+| Application code | ~120KB |
 | WhatsApp auth state | ~50KB |
 | Session files (per chat) | ~2-10KB each |
 
@@ -255,6 +332,14 @@ The lizard-brain handles greetings, thanks, time/date queries, and reminders wit
 | RAM | 1GB | ~150MB | ~850MB for Android |
 | Storage | 8-16GB | ~100MB | Plenty |
 
+## Security
+
+- Prompt injection mitigation: memory facts sanitized, data framing in system prompt
+- XSS prevention: HTML escaping on all user-controlled kiosk values
+- Message size limits: 4,000 character cap on inbound messages
+- Kiosk binds to localhost by default (not exposed to network)
+- Access control via phone number allowlist
+
 ## Production Build
 
 ```bash
@@ -274,6 +359,7 @@ npm start
 | High memory | Reduce `OPENCLAW_MAX_HISTORY` to 20 |
 | API errors | Check `ANTHROPIC_API_KEY` is valid |
 | Termux killed | Enable "Acquire wakelock" in Termux notification |
+| No web search | Set `TAVILY_API_KEY` in `.env` |
 
 ### Useful Commands
 
@@ -293,8 +379,8 @@ ps aux | grep node
 
 ## Compared to Full OpenClaw
 
-| Feature | OpenClaw | OpenClaw Lite |
-|---------|----------|---------------|
+| Feature | OpenClaw | ChadGPT |
+|---------|----------|---------|
 | WhatsApp | Yes | Yes |
 | Telegram | Yes | No |
 | Discord | Yes | No |
@@ -305,13 +391,20 @@ ps aux | grep node
 | Skills/plugins | Yes | No |
 | Gateway server | Yes | No |
 | Conversation memory | Yes | Yes |
+| Long-term memory | No | Yes |
 | Claude intelligence | Yes | Yes |
 | Custom personality | Yes | Yes |
+| Image understanding | Yes | Yes |
+| Document processing | No | Yes |
+| Web search | Yes | Yes |
+| Calendar & events | No | Yes |
+| Group chat support | No | Yes |
 | Kiosk mode | No | Yes |
-| Lizard-brain (quick responses) | No | Yes |
+| Lizard-brain | No | Yes |
 | Token budget management | No | Yes |
 | Mood system | No | Yes |
 | Reminders | No | Yes |
+| Sound effects | No | Yes |
 | RAM usage | 500-800MB | ~150MB |
 | Install size | 1.5GB+ | ~100MB |
 
