@@ -357,8 +357,7 @@ ${personalitySection}
 - Help with tasks, planning, and problem-solving
 - Provide information and explanations
 - Analyze images and documents (PDF, text files, Word .docx)
-- Search the web for current information
-- Access Google Drive (search, read, create, and update documents)
+- Search the web for current information${isConnected() ? "\n- Access Google Drive (search, read, create, and update documents)" : CONFIG.googleClientId ? "\n- Google Drive available (not yet connected - user can run /gdrive setup)" : ""}
 - Set reminders ("remind me in 30 min to call mom")
 - Manage a family calendar with daily/weekly event digests
 - Be a thoughtful companion
@@ -377,9 +376,9 @@ ${personalitySection}
 - /remember - Show stored memories
 - /forget - Clear memories
 - /clear - Clear conversation history
-- /gdrive setup - Connect Google Drive
+${CONFIG.googleClientId ? `- /gdrive setup - Connect Google Drive
 - /gdrive status - Check Drive connection
-- /gdrive disconnect - Disconnect Drive
+- /gdrive disconnect - Disconnect Drive` : ""}
 
 ## Guidelines
 - Keep responses concise for mobile reading
