@@ -440,12 +440,12 @@ function generateStatusPage(): string {
       ${_status.phoneNumber ? `
       <div class="status-row">
         <span class="status-label"><svg class="icon-sm"><use href="#icon-phone"/></svg> Phone</span>
-        <span class="status-value">${_status.phoneNumber}</span>
+        <span class="status-value">${escapeHtml(_status.phoneNumber!)}</span>
       </div>
       ` : ''}
       <div class="status-row">
         <span class="status-label">Model</span>
-        <span class="status-value model-name">${_config.model.split('/').pop()}</span>
+        <span class="status-value model-name">${escapeHtml(_config.model.split('/').pop() || _config.model)}</span>
       </div>
     </div>
 
