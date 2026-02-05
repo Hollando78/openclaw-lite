@@ -1031,9 +1031,13 @@ async function chat(chatId: string, userMessage: string, media?: MediaContent): 
     let totalTokens = (response.usage?.input_tokens || 0) + (response.usage?.output_tokens || 0);
     lizardBrain.tokens.used += totalTokens;
 
-    // Handle tool use (web search)
+    // Handle tool use loop
     let finalResponse = response;
-    while (finalResponse.stop_reason === "tool_use") {
+    const toolMessages: Anthropic.MessageParam[] = [...messages];
+    let toolRound = 0;
+    const MAX_TOOL_ROUNDS = 15;
+    while (finalResponse.stop_reason === "tool_use" && toolRound < MAX_TOOL_ROUNDS) {
+      toolRound++;
       const toolUse = finalResponse.content.find(
         (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"
       );
@@ -1218,16 +1222,18 @@ async function chat(chatId: string, userMessage: string, media?: MediaContent): 
         toolResult = `Unknown tool: ${toolUse.name}`;
       }
 
-      // Send tool result back to Claude
+      // Accumulate tool conversation history (so Claude sees prior tool results)
+      toolMessages.push(
+        { role: "assistant", content: finalResponse.content },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: toolUse.id, content: toolResult }] },
+      );
+
+      // Send tool result back to Claude with full tool history
       finalResponse = await client.messages.create({
         model: budgetParams.model,
         max_tokens: budgetParams.maxTokens,
         system: systemPrompt,
-        messages: [
-          ...messages,
-          { role: "assistant", content: finalResponse.content },
-          { role: "user", content: [{ type: "tool_result", tool_use_id: toolUse.id, content: toolResult }] },
-        ],
+        messages: toolMessages,
         tools: enabledTools.length > 0 ? enabledTools : undefined,
       });
 
