@@ -647,7 +647,7 @@ function generateKioskHTML(): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-  <title>OpenClaw Lite</title>
+  <title>ChadGPT</title>
   <style>
     ${generateKioskCSS()}
   </style>
@@ -1123,7 +1123,7 @@ function generateStatusPage(): string {
   return `<div class="page status-page" data-page="1">
     <div class="page-header">
       <svg class="icon-lobster-small"><use href="#icon-lobster"/></svg>
-      <span class="title">OpenClaw Lite</span>
+      <span class="title">ChadGPT</span>
     </div>
 
     <div class="status-card">
