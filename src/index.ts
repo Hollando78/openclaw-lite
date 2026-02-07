@@ -1728,6 +1728,9 @@ async function startWhatsApp(): Promise<void> {
       sendMessageFn = async (chatId, text) => {
         await sock.sendMessage(chatId, { text });
         status.messagesSent++;
+        // Record bot-initiated messages (digests, reminders, etc.) in session
+        // so Claude has context if the user replies to them
+        addToSession(chatId, "assistant", text);
       };
       startLizardLoop(
         sendMessageFn,
