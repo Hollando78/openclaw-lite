@@ -423,6 +423,7 @@ type Message = {
 type Session = {
   messages: Message[];
   lastActivity: number;
+  conversationSummary?: string;  // Compressed summary of older messages
 };
 
 // ============================================================================
@@ -738,6 +739,58 @@ function clearSession(chatId: string): void {
 }
 
 // ============================================================================
+// Conversation Compression (Summarize old messages to save tokens)
+// ============================================================================
+
+const COMPRESS_THRESHOLD = 25;  // Compress when history exceeds this
+const KEEP_RECENT = 12;         // Keep this many recent messages uncompressed
+
+async function compressHistoryIfNeeded(chatId: string): Promise<void> {
+  const session = loadSession(chatId);
+  if (session.messages.length <= COMPRESS_THRESHOLD) return;
+
+  const toCompress = session.messages.slice(0, -KEEP_RECENT);
+  const toKeep = session.messages.slice(-KEEP_RECENT);
+
+  // Format messages for summarization
+  const formatted = toCompress.map(m => `${m.role}: ${m.content}`).join("\n");
+
+  try {
+    const client = getClient();
+    const response = await client.messages.create({
+      model: "claude-haiku-4-5-20251001",  // Always use Haiku for compression
+      max_tokens: 300,
+      system: "Summarize this conversation in 2-3 sentences. Focus on key topics, decisions, and context needed for continuity. Be concise.",
+      messages: [
+        { role: "user", content: `${session.conversationSummary ? `Previous context: ${session.conversationSummary}\n\n` : ""}Conversation:\n${formatted}` }
+      ],
+    });
+
+    const summary = response.content[0].type === "text" ? response.content[0].text : null;
+    if (summary) {
+      session.conversationSummary = summary;
+      session.messages = toKeep;
+      saveSession(chatId, session);
+      console.log(`[compress] Compressed ${toCompress.length} messages for ${chatId.slice(0, 15)}... (${summary.length} chars)`);
+
+      // Track compression tokens
+      const tokens = (response.usage?.input_tokens || 0) + (response.usage?.output_tokens || 0);
+      lizardBrain.tokens.used += tokens;
+    }
+  } catch (err) {
+    console.error(`[compress] Failed to compress history:`, err);
+  }
+}
+
+function getCompressedHistory(chatId: string): { summary: string | null; messages: Array<{ role: "user" | "assistant"; content: string }> } {
+  const session = loadSession(chatId);
+  return {
+    summary: session.conversationSummary || null,
+    messages: session.messages.map(({ role, content }) => ({ role, content })),
+  };
+}
+
+// ============================================================================
 // Claude API
 // ============================================================================
 
@@ -995,11 +1048,11 @@ async function chat(chatId: string, userMessage: string, media?: MediaContent): 
       : userMessage;
   addToSession(chatId, "user", historyText);
 
-  // Get conversation history (respecting budget-aware limits)
-  let history = getConversationHistory(chatId);
-  if (history.length > budgetParams.maxHistory) {
-    history = history.slice(-budgetParams.maxHistory);
-  }
+  // Compress old messages if history is too long
+  await compressHistoryIfNeeded(chatId);
+
+  // Get compressed conversation history
+  const { summary: conversationSummary, messages: history } = getCompressedHistory(chatId);
 
   // Update idle time and curiosity
   const idleTime = Date.now() - lizardBrain.proactive.idleSince;
@@ -1072,8 +1125,11 @@ async function chat(chatId: string, userMessage: string, media?: MediaContent): 
       { role: "user", content: currentContent },
     ];
 
-    // Build system prompt with memory context
-    const systemPrompt = buildSystemPrompt() + buildMemoryContext(chatId);
+    // Build system prompt with memory context and conversation summary
+    let systemPrompt = buildSystemPrompt() + buildMemoryContext(chatId);
+    if (conversationSummary) {
+      systemPrompt += `\n\n## Earlier in this conversation\n${conversationSummary}`;
+    }
 
     const response = await client.messages.create({
       model: budgetParams.model,
@@ -1086,6 +1142,7 @@ async function chat(chatId: string, userMessage: string, media?: MediaContent): 
     // Track token usage
     let totalTokens = (response.usage?.input_tokens || 0) + (response.usage?.output_tokens || 0);
     lizardBrain.tokens.used += totalTokens;
+    console.log(`[api] ${budgetParams.model} | in:${response.usage?.input_tokens} out:${response.usage?.output_tokens} | history:${messages.length}msg | budget:${Math.round(lizardBrain.tokens.used / lizardBrain.tokens.budget * 100)}%`);
 
     // Handle tool use loop
     let finalResponse = response;
@@ -1297,6 +1354,7 @@ async function chat(chatId: string, userMessage: string, media?: MediaContent): 
       const additionalTokens = (finalResponse.usage?.input_tokens || 0) + (finalResponse.usage?.output_tokens || 0);
       totalTokens += additionalTokens;
       lizardBrain.tokens.used += additionalTokens;
+      console.log(`[api] tool-round:${toolRound} | in:${finalResponse.usage?.input_tokens} out:${finalResponse.usage?.output_tokens} | budget:${Math.round(lizardBrain.tokens.used / lizardBrain.tokens.budget * 100)}%`);
     }
 
     // Log token usage at budget thresholds
