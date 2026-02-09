@@ -31,6 +31,8 @@ export type SharedList = {
   id: string;
   name: string;
   items: ListItem[];
+  createdBy: string;           // chatId of creator
+  sharedWith: Array<{ jid: string; name: string }>;
   createdAt: number;
 };
 
@@ -49,7 +51,13 @@ function getListsPath(): string {
 export function loadLists(): ListsData {
   try {
     const data = fs.readFileSync(getListsPath(), "utf-8");
-    return JSON.parse(data);
+    const parsed = JSON.parse(data);
+    // Backward compat: add missing fields
+    for (const list of parsed.lists) {
+      if (!list.createdBy) list.createdBy = "";
+      if (!list.sharedWith) list.sharedWith = [];
+    }
+    return parsed;
   } catch {
     return { lists: [] };
   }
@@ -64,16 +72,32 @@ export function generateListId(): string {
 }
 
 // ============================================================================
+// Visibility
+// ============================================================================
+
+export function isListVisible(list: SharedList, chatId: string): boolean {
+  // Visible if: creator, or shared with this chatId, or no creator set (legacy)
+  if (!list.createdBy) return true;
+  if (list.createdBy === chatId) return true;
+  return list.sharedWith.some(s => s.jid === chatId);
+}
+
+export function getVisibleLists(data: ListsData, chatId: string): SharedList[] {
+  return data.lists.filter(l => isListVisible(l, chatId));
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
-export function findList(data: ListsData, name: string): SharedList | undefined {
+export function findList(data: ListsData, name: string, chatId?: string): SharedList | undefined {
   const search = name.trim().toLowerCase();
+  const pool = chatId ? getVisibleLists(data, chatId) : data.lists;
   // Exact match first
-  const exact = data.lists.find(l => l.name.toLowerCase() === search);
+  const exact = pool.find(l => l.name.toLowerCase() === search);
   if (exact) return exact;
   // Partial match
-  return data.lists.find(l => l.name.toLowerCase().includes(search));
+  return pool.find(l => l.name.toLowerCase().includes(search));
 }
 
 export function findItem(list: SharedList, text: string): ListItem | undefined {
@@ -84,20 +108,27 @@ export function findItem(list: SharedList, text: string): ListItem | undefined {
 }
 
 export function formatList(list: SharedList): string {
+  const shared = list.sharedWith.length > 0
+    ? ` (shared with ${list.sharedWith.map(s => s.name).join(", ")})`
+    : "";
   if (list.items.length === 0) {
-    return `*${list.name}* — empty`;
+    return `*${list.name}*${shared} — empty`;
   }
   const lines = list.items.map(i => `${i.done ? "☑" : "☐"} ${i.text}`);
   const done = list.items.filter(i => i.done).length;
   const total = list.items.length;
-  return `*${list.name}* (${done}/${total} done)\n${lines.join("\n")}`;
+  return `*${list.name}* (${done}/${total} done)${shared}\n${lines.join("\n")}`;
 }
 
-export function formatAllLists(data: ListsData): string {
-  if (data.lists.length === 0) return "No lists yet.";
-  return data.lists.map(l => {
+export function formatAllLists(data: ListsData, chatId?: string): string {
+  const lists = chatId ? getVisibleLists(data, chatId) : data.lists;
+  if (lists.length === 0) return "No lists yet.";
+  return lists.map(l => {
     const done = l.items.filter(i => i.done).length;
     const total = l.items.length;
-    return `• *${l.name}* — ${total} item${total !== 1 ? "s" : ""}${done > 0 ? ` (${done} done)` : ""}`;
+    const shared = l.sharedWith.length > 0
+      ? ` (shared with ${l.sharedWith.map(s => s.name).join(", ")})`
+      : "";
+    return `• *${l.name}* — ${total} item${total !== 1 ? "s" : ""}${done > 0 ? ` (${done} done)` : ""}${shared}`;
   }).join("\n");
 }

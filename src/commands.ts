@@ -22,7 +22,7 @@ import {
 } from "./github.js";
 import {
   loadLists, saveLists, findList, findItem, generateListId,
-  formatList, formatAllLists,
+  formatList, formatAllLists, getVisibleLists,
 } from "./lists.js";
 
 // ============================================================================
@@ -90,6 +90,7 @@ Or just say: "remind me in 30 min to..."
 /list create <name> - Create a new list
 /list add <name> Item text - Add item to list
 /list check <name> Item - Mark item done
+/list share <name> <contact> - Share list with a contact
 /list clear <name> - Remove checked items
 /list delete <name> - Delete a list
 ${CONFIG.googleClientId ? `
@@ -481,10 +482,11 @@ Or just say: "remind me in 30 min to call mom"`;
 
     case "lists": {
       const data = loadLists();
-      if (data.lists.length === 0) {
+      const visible = getVisibleLists(data, chatId);
+      if (visible.length === 0) {
         return "📝 No lists yet. Create one with `/list create <name>` or just say \"add milk to shopping list\".";
       }
-      return `📝 *All Lists*\n\n${formatAllLists(data)}`;
+      return `📝 *All Lists*\n\n${formatAllLists(data, chatId)}`;
     }
 
     case "list": {
@@ -495,8 +497,8 @@ Or just say: "remind me in 30 min to call mom"`;
         const name = args.slice(1).join(" ").trim();
         if (!name) return "Usage: `/list create <name>`";
         const data = loadLists();
-        if (findList(data, name)) return `List "${name}" already exists. Use \`/list ${name}\` to view it.`;
-        data.lists.push({ id: generateListId(), name, items: [], createdAt: Date.now() });
+        if (findList(data, name, chatId)) return `List "${name}" already exists. Use \`/list ${name}\` to view it.`;
+        data.lists.push({ id: generateListId(), name, items: [], createdBy: chatId, sharedWith: [], createdAt: Date.now() });
         saveLists(data);
         return `📝 Created list "${name}". Add items with \`/list add ${name} item text\`.`;
       }
@@ -507,10 +509,10 @@ Or just say: "remind me in 30 min to call mom"`;
         const itemText = args.slice(2).join(" ").trim();
         if (!name || !itemText) return "Usage: `/list add <name> item text`";
         const data = loadLists();
-        let list = findList(data, name);
+        let list = findList(data, name, chatId);
         let created = false;
         if (!list) {
-          list = { id: generateListId(), name: name.trim(), items: [], createdAt: Date.now() };
+          list = { id: generateListId(), name: name.trim(), items: [], createdBy: chatId, sharedWith: [], createdAt: Date.now() };
           data.lists.push(list);
           created = true;
         }
@@ -525,7 +527,7 @@ Or just say: "remind me in 30 min to call mom"`;
         const itemText = args.slice(2).join(" ").trim();
         if (!name || !itemText) return "Usage: `/list remove <name> item text`";
         const data = loadLists();
-        const list = findList(data, name);
+        const list = findList(data, name, chatId);
         if (!list) return `List "${name}" not found. Use \`/lists\` to see all lists.`;
         const item = findItem(list, itemText);
         if (!item) return `Item "${itemText}" not found in "${list.name}".`;
@@ -540,7 +542,7 @@ Or just say: "remind me in 30 min to call mom"`;
         const itemText = args.slice(2).join(" ").trim();
         if (!name || !itemText) return "Usage: `/list check <name> item text`";
         const data = loadLists();
-        const list = findList(data, name);
+        const list = findList(data, name, chatId);
         if (!list) return `List "${name}" not found.`;
         const item = findItem(list, itemText);
         if (!item) return `Item "${itemText}" not found in "${list.name}".`;
@@ -555,7 +557,7 @@ Or just say: "remind me in 30 min to call mom"`;
         const itemText = args.slice(2).join(" ").trim();
         if (!name || !itemText) return "Usage: `/list uncheck <name> item text`";
         const data = loadLists();
-        const list = findList(data, name);
+        const list = findList(data, name, chatId);
         if (!list) return `List "${name}" not found.`;
         const item = findItem(list, itemText);
         if (!item) return `Item "${itemText}" not found in "${list.name}".`;
@@ -564,12 +566,61 @@ Or just say: "remind me in 30 min to call mom"`;
         return `☐ "${item.text}" undone.`;
       }
 
+      // /list share <name> <contact_name>
+      if (subCmd === "share") {
+        const name = args[1];
+        const contactName = args.slice(2).join(" ").trim();
+        if (!name || !contactName) return "Usage: `/list share <name> <contact name>`";
+        const data = loadLists();
+        const list = findList(data, name, chatId);
+        if (!list) return `List "${name}" not found.`;
+
+        const cal = loadCalendar();
+        const knownContacts = new Map<string, { jid: string; name: string }>();
+        for (const c of cal.contacts) knownContacts.set(c.name.toLowerCase(), c);
+        for (const e of cal.events) {
+          for (const u of e.taggedUsers) {
+            if (!knownContacts.has(u.name.toLowerCase())) knownContacts.set(u.name.toLowerCase(), u);
+          }
+        }
+
+        const searchName = contactName.toLowerCase();
+        let match: { jid: string; name: string } | undefined;
+        for (const [cname, contact] of knownContacts) {
+          if (cname === searchName || cname.includes(searchName)) { match = contact; break; }
+        }
+
+        if (!match) {
+          const names = [...knownContacts.values()].map(c => c.name);
+          return names.length === 0
+            ? "No known contacts. Add contacts via `/contacts add` first."
+            : `Contact "${contactName}" not found. Known: ${names.join(", ")}`;
+        }
+
+        if (list.sharedWith.some(s => s.jid === match!.jid)) {
+          return `"${list.name}" is already shared with ${match.name}.`;
+        }
+
+        list.sharedWith.push({ jid: match.jid, name: match.name });
+        saveLists(data);
+
+        const sendFn = getSendMessageFn();
+        if (sendFn) {
+          const itemCount = list.items.length;
+          sendFn(match.jid, `📝 *${list.name}* list was shared with you (${itemCount} item${itemCount !== 1 ? "s" : ""}).\n\nSay "show my lists" or type /lists to see it.`).catch(err => {
+            console.error(`[lists] Failed to notify ${match!.name}:`, err);
+          });
+        }
+
+        return `📤 Shared "${list.name}" with ${match.name}. They've been notified.`;
+      }
+
       // /list clear <name> — remove all checked items
       if (subCmd === "clear") {
         const name = args.slice(1).join(" ").trim();
         if (!name) return "Usage: `/list clear <name>`";
         const data = loadLists();
-        const list = findList(data, name);
+        const list = findList(data, name, chatId);
         if (!list) return `List "${name}" not found.`;
         const before = list.items.length;
         list.items = list.items.filter(i => !i.done);
@@ -584,7 +635,7 @@ Or just say: "remind me in 30 min to call mom"`;
         const name = args.slice(1).join(" ").trim();
         if (!name) return "Usage: `/list delete <name>`";
         const data = loadLists();
-        const list = findList(data, name);
+        const list = findList(data, name, chatId);
         if (!list) return `List "${name}" not found.`;
         data.lists = data.lists.filter(l => l.id !== list.id);
         saveLists(data);
@@ -594,12 +645,12 @@ Or just say: "remind me in 30 min to call mom"`;
       // /list <name> — show a specific list (default if no recognized subcommand)
       if (subCmd) {
         const data = loadLists();
-        const list = findList(data, args.join(" "));
+        const list = findList(data, args.join(" "), chatId);
         if (list) return `📝 ${formatList(list)}`;
         return `List "${args.join(" ")}" not found. Use \`/lists\` to see all lists or \`/list create ${args.join(" ")}\` to create one.`;
       }
 
-      return `Usage: \`/list create|add|remove|check|clear|delete ...\`\nOr \`/list <name>\` to show a list.\nType \`/help\` for details.`;
+      return `Usage: \`/list create|add|remove|check|share|clear|delete ...\`\nOr \`/list <name>\` to show a list.\nType \`/help\` for details.`;
     }
 
     case "contacts":

@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { CONFIG } from "./config.js";
+import { CONFIG, getSendMessageFn } from "./config.js";
 import { addReminder, listReminders, cancelReminder, formatDuration } from "./lizard-brain.js";
 import { loadMemory, saveMemory, isValidUserFact, sanitizeFact } from "./memory.js";
 import {
@@ -19,7 +19,7 @@ import {
 } from "./github.js";
 import {
   loadLists, saveLists, findList, findItem, generateListId,
-  formatList, formatAllLists,
+  formatList, formatAllLists, isListVisible,
 } from "./lists.js";
 
 // ============================================================================
@@ -265,6 +265,19 @@ const deleteListTool: Anthropic.Tool = {
   },
 };
 
+const shareListTool: Anthropic.Tool = {
+  name: "share_list",
+  description: "Share a list with a known contact. The contact will be notified and can view/edit the list. Use when the user says to share a list with someone.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      list_name: { type: "string", description: "Name of the list to share" },
+      contact_name: { type: "string", description: "Name of the contact to share with (case-insensitive partial match against known contacts)" },
+    },
+    required: ["list_name", "contact_name"],
+  },
+};
+
 const gdriveTools: Anthropic.Tool[] = [
   {
     name: "gdrive_search",
@@ -460,7 +473,7 @@ const githubTools: Anthropic.Tool[] = [
 // ============================================================================
 
 export function getEnabledTools(): Anthropic.Tool[] {
-  const tools: Anthropic.Tool[] = [setReminderTool, listRemindersTool, cancelReminderTool, createEventTool, listEventsTool, tagEventTool, listContactsTool, renameContactTool, rememberFactTool, forgetFactTool, addToListTool, removeFromListTool, checkListItemTool, showListTool, deleteListTool];
+  const tools: Anthropic.Tool[] = [setReminderTool, listRemindersTool, cancelReminderTool, createEventTool, listEventsTool, tagEventTool, listContactsTool, renameContactTool, rememberFactTool, forgetFactTool, addToListTool, removeFromListTool, checkListItemTool, showListTool, deleteListTool, shareListTool];
   if (CONFIG.tavilyApiKey) tools.push(webSearchTool);
   if (isConnected()) tools.push(...gdriveTools);
   if (isGitHubConnected()) tools.push(...githubTools);
@@ -863,10 +876,10 @@ export async function executeToolCall(toolUse: Anthropic.ToolUseBlock, chatId: s
     if (!list_name) return "Need a list name.";
     if (!items || items.length === 0) return "Need at least one item to add.";
     const data = loadLists();
-    let list = findList(data, list_name);
+    let list = findList(data, list_name, chatId);
     let created = false;
     if (!list) {
-      list = { id: generateListId(), name: list_name.trim(), items: [], createdAt: Date.now() };
+      list = { id: generateListId(), name: list_name.trim(), items: [], createdBy: chatId, sharedWith: [], createdAt: Date.now() };
       data.lists.push(list);
       created = true;
     }
@@ -885,7 +898,7 @@ export async function executeToolCall(toolUse: Anthropic.ToolUseBlock, chatId: s
     if (!list_name) return "Need a list name.";
     if (!items || items.length === 0) return "Need at least one item to remove.";
     const data = loadLists();
-    const list = findList(data, list_name);
+    const list = findList(data, list_name, chatId);
     if (!list) return `List "${list_name}" not found.`;
     const removed: string[] = [];
     for (const text of items) {
@@ -905,7 +918,7 @@ export async function executeToolCall(toolUse: Anthropic.ToolUseBlock, chatId: s
     const { list_name, item } = toolUse.input as { list_name: string; item: string };
     if (!list_name || !item) return "Need both list_name and item.";
     const data = loadLists();
-    const list = findList(data, list_name);
+    const list = findList(data, list_name, chatId);
     if (!list) return `List "${list_name}" not found.`;
     const found = findItem(list, item);
     if (!found) return `Item "${item}" not found in "${list.name}".`;
@@ -918,9 +931,9 @@ export async function executeToolCall(toolUse: Anthropic.ToolUseBlock, chatId: s
   if (toolUse.name === "show_list") {
     const { list_name } = toolUse.input as { list_name?: string };
     const data = loadLists();
-    if (!list_name) return formatAllLists(data);
-    const list = findList(data, list_name);
-    if (!list) return `List "${list_name}" not found. ${formatAllLists(data)}`;
+    if (!list_name) return formatAllLists(data, chatId);
+    const list = findList(data, list_name, chatId);
+    if (!list) return `List "${list_name}" not found. ${formatAllLists(data, chatId)}`;
     return formatList(list);
   }
 
@@ -928,12 +941,62 @@ export async function executeToolCall(toolUse: Anthropic.ToolUseBlock, chatId: s
     const { list_name } = toolUse.input as { list_name: string };
     if (!list_name) return "Need a list name to delete.";
     const data = loadLists();
-    const list = findList(data, list_name);
+    const list = findList(data, list_name, chatId);
     if (!list) return `List "${list_name}" not found.`;
     data.lists = data.lists.filter(l => l.id !== list.id);
     saveLists(data);
     console.log(`[lists] Deleted list "${list.name}"`);
     return `Deleted list "${list.name}".`;
+  }
+
+  if (toolUse.name === "share_list") {
+    const { list_name, contact_name } = toolUse.input as { list_name: string; contact_name: string };
+    if (!list_name || !contact_name) return "Need both list_name and contact_name.";
+    const data = loadLists();
+    const list = findList(data, list_name, chatId);
+    if (!list) return `List "${list_name}" not found.`;
+
+    // Find contact from known contacts (calendar contacts + event tags)
+    const cal = loadCalendar();
+    const knownContacts = new Map<string, { jid: string; name: string }>();
+    for (const c of cal.contacts) knownContacts.set(c.name.toLowerCase(), c);
+    for (const e of cal.events) {
+      for (const u of e.taggedUsers) {
+        if (!knownContacts.has(u.name.toLowerCase())) knownContacts.set(u.name.toLowerCase(), u);
+      }
+    }
+
+    const searchName = contact_name.trim().toLowerCase();
+    let match: { jid: string; name: string } | undefined;
+    for (const [name, contact] of knownContacts) {
+      if (name === searchName || name.includes(searchName)) { match = contact; break; }
+    }
+
+    if (!match) {
+      const names = [...knownContacts.values()].map(c => c.name);
+      return names.length === 0
+        ? "No known contacts. Add contacts via /contacts add first."
+        : `Contact "${contact_name}" not found. Known contacts: ${names.join(", ")}`;
+    }
+
+    if (list.sharedWith.some(s => s.jid === match!.jid)) {
+      return `"${list.name}" is already shared with ${match.name}.`;
+    }
+
+    list.sharedWith.push({ jid: match.jid, name: match.name });
+    saveLists(data);
+    console.log(`[lists] Shared "${list.name}" with ${match.name} (${match.jid})`);
+
+    // Notify the contact
+    const sendFn = getSendMessageFn();
+    if (sendFn) {
+      const itemCount = list.items.length;
+      sendFn(match.jid, `📝 *${list.name}* list was shared with you (${itemCount} item${itemCount !== 1 ? "s" : ""}).\n\nSay "show my lists" or type /lists to see it.`).catch(err => {
+        console.error(`[lists] Failed to notify ${match!.name}:`, err);
+      });
+    }
+
+    return `Shared "${list.name}" with ${match.name}. They've been notified.`;
   }
 
   return `Unknown tool: ${toolUse.name}`;
