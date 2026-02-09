@@ -503,11 +503,13 @@ Or just say: "remind me in 30 min to call mom"`;
         return `📝 Created list "${name}". Add items with \`/list add ${name} item text\`.`;
       }
 
-      // /list add <name> <item>
+      // /list add <name> <items> (comma-separated for multiple)
       if (subCmd === "add") {
         const name = args[1];
         const itemText = args.slice(2).join(" ").trim();
-        if (!name || !itemText) return "Usage: `/list add <name> item text`";
+        if (!name || !itemText) return "Usage: `/list add <name> item1, item2, ...`";
+        const items = itemText.split(",").map(s => s.trim()).filter(Boolean);
+        if (items.length === 0) return "No items to add.";
         const data = loadLists();
         let list = findList(data, name, chatId);
         let created = false;
@@ -516,9 +518,12 @@ Or just say: "remind me in 30 min to call mom"`;
           data.lists.push(list);
           created = true;
         }
-        list.items.push({ id: generateListId(), text: itemText, done: false, addedAt: Date.now() });
+        for (const text of items) {
+          list.items.push({ id: generateListId(), text, done: false, addedAt: Date.now() });
+        }
         saveLists(data);
-        return `${created ? `📝 Created "${list.name}" and added` : "➕ Added"} "${itemText}" to ${list.name} (${list.items.length} item${list.items.length !== 1 ? "s" : ""}).`;
+        const added = items.length === 1 ? `"${items[0]}"` : `${items.length} items`;
+        return `${created ? `📝 Created "${list.name}" and added` : "➕ Added"} ${added} to ${list.name} (${list.items.length} total).`;
       }
 
       // /list remove <name> <item>
