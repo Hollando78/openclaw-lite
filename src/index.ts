@@ -24,12 +24,13 @@ import { initKiosk, startStatusServer, formatUptime } from "./kiosk.js";
 import {
   lizardBrain, initLizardBrain, tryQuickResponse,
   getBudgetAwareParams, applyMoodModifiers, startLizardLoop,
+  addReminder, listReminders, cancelReminder, formatDuration,
   type BudgetAwareParams,
 } from "./lizard-brain.js";
 import {
   initCalendar, pendingContactTag, setPendingContactTag, consumePendingContactTag,
   loadCalendar, saveCalendar, generateEventId, parseVCard, vcardToJid,
-  findUserName, processCalendarDigests,
+  findUserName, processCalendarDigests, collectDueActionableEvents,
   DAY_NAMES_SHORT, DAY_NAMES_FULL, DAY_MAP,
   type CalendarEvent, type CalendarData,
 } from "./calendar.js";
@@ -373,7 +374,8 @@ ${personalitySection}
 - Provide information and explanations
 - Analyze images and documents (PDF, text files, Word .docx)
 - Search the web for current information${isConnected() ? "\n- Access Google Drive (search, read, create, and update documents)" : CONFIG.googleClientId ? "\n- Google Drive available (not yet connected - user can run /gdrive setup)" : ""}${isGitHubConnected() ? "\n- Access GitHub (manage repos, issues, PRs, and files)" : ""}
-- Set reminders ("remind me in 30 min to call mom")
+- Set reminders ("remind me in 30 min to call mom", "remind me at 3pm to check oven")
+- Schedule recurring reminders via /remind daily or /remind weekly
 - Manage a family calendar with daily/weekly event digests
 - Be a thoughtful companion
 
@@ -387,6 +389,12 @@ ${personalitySection}
 - /event tag <id> - Tag a contact to an event (then share a contact)
 - /event digest daily HH:MM - Set daily digest time
 - /event digest weekly Day HH:MM - Set weekly digest time
+- /remind in 30 min Call mom - Set countdown reminder
+- /remind at 15:00 Check oven - Remind at specific time
+- /remind daily 08:00 Journal - Daily recurring reminder
+- /remind weekly Mon 09:00 Standup - Weekly recurring reminder
+- /remind list - Show pending reminders
+- /remind cancel <id> - Cancel a reminder
 - /status - Show bot status
 - /remember - Show stored memories
 - /forget - Clear memories
@@ -1440,6 +1448,15 @@ function handleCommand(chatId: string, senderId: string, text: string): string |
 /remember - Show what I remember about you
 /forget - Clear all memories about you
 
+*Reminders*
+/remind in 30 min Call mom
+/remind at 15:00 Check oven
+/remind daily 08:00 Write journal
+/remind weekly Mon 09:00 Standup
+/remind list - Show pending reminders
+/remind cancel <id> - Cancel a reminder
+Or just say: "remind me in 30 min to..."
+
 *Calendar & Events*
 /calendar - Show all events
 /event add daily HH:MM Title
@@ -1486,7 +1503,14 @@ ${tokenUsage >= 90 ? "⚠️ Budget critical!" : tokenUsage >= 75 ? "⚡ Running
 Resets: ${new Date(lizardBrain.tokens.resetAt).toLocaleTimeString()}
 
 *📋 Reminders*
-Pending: ${lizardBrain.proactive.pendingReminders.length}
+${(() => {
+  const reminders = listReminders(chatId);
+  if (reminders.length === 0) return "No pending reminders";
+  return `Pending: ${reminders.length}\n` + reminders.map(r => {
+    const minsLeft = Math.max(0, Math.ceil((r.dueAt - Date.now()) / 60000));
+    return `  #${r.id}. "${r.message}" — in ${formatDuration(minsLeft)}`;
+  }).join("\n");
+})()}
 
 Running on minimal hardware 💪`;
 
@@ -1523,6 +1547,133 @@ Running on minimal hardware 💪`;
     case "forget":
       saveMemory(chatId, { facts: [], summary: null, summaryUpTo: 0, lastUpdated: 0 });
       return "🧠 Done! I've forgotten everything about you. Fresh start!";
+
+    case "remind":
+    case "reminder":
+    case "reminders": {
+      const subCmd = args[0]?.toLowerCase();
+
+      // /remind list (or /reminders with no args)
+      if (!subCmd || subCmd === "list") {
+        const reminders = listReminders(chatId);
+        if (reminders.length === 0) {
+          return "📋 No pending reminders. Set one with:\n• /remind in 30 min Call mom\n• /remind at 15:00 Check oven\n• /remind daily 08:00 Write journal";
+        }
+        let output = "📋 *Pending Reminders*\n\n";
+        for (const r of reminders) {
+          const minsLeft = Math.max(0, Math.ceil((r.dueAt - Date.now()) / 60000));
+          output += `#${r.id}. "${r.message}" — in ${formatDuration(minsLeft)}\n`;
+        }
+        output += `\nCancel with: /remind cancel <id>`;
+        return output;
+      }
+
+      // /remind cancel <id>
+      if (subCmd === "cancel" || subCmd === "remove") {
+        const id = parseInt(args[1], 10);
+        if (isNaN(id)) return "Usage: `/remind cancel <id>`\nUse `/remind list` to see IDs.";
+        if (cancelReminder(chatId, id)) {
+          return `✅ Reminder #${id} cancelled.`;
+        }
+        return `Reminder #${id} not found. Use \`/remind list\` to see your reminders.`;
+      }
+
+      // /remind in <N> <min/hours> <task>
+      if (subCmd === "in") {
+        const amount = parseInt(args[1], 10);
+        if (isNaN(amount)) return "Usage: `/remind in 30 min Call mom`";
+        const unit = args[2]?.toLowerCase() || "";
+        const task = args.slice(3).join(" ");
+        if (!task) return "Usage: `/remind in 30 min Call mom`";
+
+        let minutes = amount;
+        if (unit.startsWith("h")) minutes = amount * 60;
+
+        const reminder = addReminder(chatId, task, minutes);
+        return `⏰ Got it! I'll remind you in ${formatDuration(minutes)} to: ${task} [#${reminder.id}]`;
+      }
+
+      // /remind at <HH:MM> <task>
+      if (subCmd === "at") {
+        const timeArg = args[1];
+        const task = args.slice(2).join(" ");
+        if (!timeArg || !task) return "Usage: `/remind at 15:00 Check oven` or `/remind at 3pm Check oven`";
+
+        // Parse time: "15:00", "3pm", "3:30pm"
+        const timeMatch = timeArg.match(/^(\d{1,2})(?::(\d{2}))?(am|pm)?$/i);
+        if (!timeMatch) return "Usage: `/remind at 15:00 Check oven` or `/remind at 3pm Check oven`";
+
+        let hours = parseInt(timeMatch[1], 10);
+        const mins = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
+        const ampm = timeMatch[3]?.toLowerCase();
+
+        if (ampm === "pm" && hours < 12) hours += 12;
+        if (ampm === "am" && hours === 12) hours = 0;
+
+        if (hours < 0 || hours > 23 || mins < 0 || mins > 59) return "Invalid time. Use HH:MM (24h) or HH:MMam/pm.";
+
+        const now = new Date();
+        const target = new Date(now);
+        target.setHours(hours, mins, 0, 0);
+        if (target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1);
+
+        const diffMins = Math.ceil((target.getTime() - now.getTime()) / 60000);
+        const timeStr = `${hours.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}`;
+        const reminder = addReminder(chatId, task, diffMins);
+        return `⏰ Got it! I'll remind you at ${timeStr} to: ${task} [#${reminder.id}]`;
+      }
+
+      // /remind daily <HH:MM> <task> → bridge to calendar event
+      if (subCmd === "daily") {
+        const time = args[1];
+        const task = args.slice(2).join(" ");
+        if (!time || !task || !/^\d{2}:\d{2}$/.test(time)) {
+          return "Usage: `/remind daily 08:00 Write journal`";
+        }
+        const id = generateEventId();
+        const cal = loadCalendar();
+        cal.events.push({
+          id, title: task, recurrence: "daily", time,
+          taggedUsers: [{ jid: senderId, name: senderId.replace(/@.*$/, "") }],
+          createdBy: senderId, createdAt: Date.now(), chatId, actionable: true,
+        });
+        saveCalendar(cal);
+        return `⏰ Daily reminder "${task}" at ${time} created! [${id}]\nI'll act on this every day at ${time}. Remove with: \`/event remove ${id}\``;
+      }
+
+      // /remind weekly <Day> <HH:MM> <task> → bridge to calendar event
+      if (subCmd === "weekly") {
+        const dayStr = args[1]?.toLowerCase();
+        const dayOfWeek = DAY_MAP[dayStr];
+        if (dayOfWeek === undefined) {
+          return "Usage: `/remind weekly Mon 09:00 Standup`\nDays: Sun, Mon, Tue, Wed, Thu, Fri, Sat";
+        }
+        const time = args[2];
+        const task = args.slice(3).join(" ");
+        if (!time || !task || !/^\d{2}:\d{2}$/.test(time)) {
+          return "Usage: `/remind weekly Mon 09:00 Standup`";
+        }
+        const id = generateEventId();
+        const cal = loadCalendar();
+        cal.events.push({
+          id, title: task, recurrence: "weekly", dayOfWeek, time,
+          taggedUsers: [{ jid: senderId, name: senderId.replace(/@.*$/, "") }],
+          createdBy: senderId, createdAt: Date.now(), chatId, actionable: true,
+        });
+        saveCalendar(cal);
+        return `⏰ Weekly reminder "${task}" every ${DAY_NAMES_SHORT[dayOfWeek]} at ${time} created! [${id}]\nI'll act on this every ${DAY_NAMES_SHORT[dayOfWeek]} at ${time}. Remove with: \`/event remove ${id}\``;
+      }
+
+      return `Usage:
+/remind in 30 min Call mom
+/remind at 15:00 Check oven
+/remind daily 08:00 Write journal
+/remind weekly Mon 09:00 Standup
+/remind list - Show reminders
+/remind cancel <id> - Cancel reminder
+
+Or just say: "remind me in 30 min to call mom"`;
+    }
 
     case "calendar": {
       const cal = loadCalendar();
@@ -1848,7 +1999,27 @@ async function startWhatsApp(): Promise<void> {
       };
       startLizardLoop(
         sendMessageFn,
-        () => processCalendarDigests(sendMessageFn!),
+        async () => {
+          await processCalendarDigests(sendMessageFn!);
+
+          // Process actionable reminders (e.g. "/remind daily 20:00 Write journal entry")
+          const dueActions = collectDueActionableEvents();
+          for (const evt of dueActions) {
+            const ownerJid = CONFIG.ownerNumber ? `${CONFIG.ownerNumber.replace(/[^0-9]/g, "")}@s.whatsapp.net` : null;
+            const targetChat = ownerJid || evt.chatId;
+            try {
+              console.log(`[remind] Actionable reminder firing: "${evt.title}" → chat ${targetChat}`);
+              const response = await chat(targetChat, evt.title);
+              await sendMessageFn!(targetChat, response);
+            } catch (err) {
+              console.error(`[remind] Failed to process actionable reminder "${evt.title}":`, err);
+              // Fall back to a simple notification
+              try {
+                await sendMessageFn!(targetChat, `⏰ *Reminder*: ${evt.title}`);
+              } catch {}
+            }
+          }
+        },
         () => {
           for (const [chatId, state] of pendingContactTag.entries()) {
             if (Date.now() > state.expiresAt) {

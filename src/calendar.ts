@@ -51,6 +51,7 @@ export type CalendarEvent = {
   createdBy: string;
   createdAt: number;
   chatId: string;
+  actionable?: boolean;     // If true, bot processes this via Claude instead of just notifying
 };
 
 export type CalendarData = {
@@ -58,6 +59,7 @@ export type CalendarData = {
   digestConfig: { dailyTime: string; weeklyDay: number; weeklyTime: string };
   lastDailyDigest: Record<string, number>;
   lastWeeklyDigest: Record<string, number>;
+  lastActionableFired: Record<string, string>; // eventId -> last fired date "YYYY-MM-DD"
 };
 
 // ============================================================================
@@ -88,6 +90,7 @@ export function loadCalendar(): CalendarData {
       digestConfig: { dailyTime: "07:00", weeklyDay: 0, weeklyTime: "18:00" },
       lastDailyDigest: {},
       lastWeeklyDigest: {},
+      lastActionableFired: {},
     };
   }
 }
@@ -272,7 +275,11 @@ export async function processCalendarDigests(
 
   // --- Weekly Digest ---
   if (currentDay === cal.digestConfig.weeklyDay && isTimeWithinWindow(currentTime, cal.digestConfig.weeklyTime, 60)) {
-    const userWeekEvents = collectWeekEvents(cal.events, currentDay, todayStr);
+    // Start from tomorrow (next 7 days), not today
+    const tomorrowMs = now.getTime() + 86400000;
+    const tomorrowDay = (currentDay + 1) % 7;
+    const tomorrowStr = getDateStr(new Date(tomorrowMs));
+    const userWeekEvents = collectWeekEvents(cal.events, tomorrowDay, tomorrowStr);
     let saved = false;
 
     for (const [jid, dayMap] of Object.entries(userWeekEvents)) {
@@ -283,8 +290,8 @@ export async function processCalendarDigests(
       let msg = `📅 *Weekly Schedule, ${userName}!*\n\nHere's your week ahead:\n\n`;
 
       for (let d = 0; d < 7; d++) {
-        const day = (currentDay + d) % 7;
-        const dateForDay = new Date(now.getTime() + d * 86400000);
+        const day = (tomorrowDay + d) % 7;
+        const dateForDay = new Date(tomorrowMs + d * 86400000);
         const eventsForDay = dayMap[day] || [];
         if (eventsForDay.length === 0) continue;
 
@@ -312,4 +319,44 @@ export async function processCalendarDigests(
     saveCalendar(cal);
     console.log("[calendar] Cleaned up past one-time events");
   }
+}
+
+/**
+ * Find actionable events that are due right now (within a 60-second window)
+ * and haven't fired yet today. Returns the events and marks them as fired.
+ */
+export function collectDueActionableEvents(): CalendarEvent[] {
+  const cal = loadCalendar();
+  const now = new Date();
+  const currentTime = getTimeStr(now);
+  const currentDay = now.getDay();
+  const todayStr = getDateStr(now);
+  const due: CalendarEvent[] = [];
+
+  // Initialize lastActionableFired if missing (backwards compat)
+  if (!cal.lastActionableFired) cal.lastActionableFired = {};
+
+  for (const evt of cal.events) {
+    if (!evt.actionable) continue;
+    if (!isTimeWithinWindow(currentTime, evt.time, 60)) continue;
+
+    // Check recurrence matches today
+    let isToday = false;
+    if (evt.recurrence === "daily") isToday = true;
+    else if (evt.recurrence === "weekly" && evt.dayOfWeek === currentDay) isToday = true;
+    else if (evt.recurrence === "once" && evt.date === todayStr) isToday = true;
+    if (!isToday) continue;
+
+    // Skip if already fired today
+    if (cal.lastActionableFired[evt.id] === todayStr) continue;
+
+    due.push(evt);
+    cal.lastActionableFired[evt.id] = todayStr;
+  }
+
+  if (due.length > 0) {
+    saveCalendar(cal);
+  }
+
+  return due;
 }

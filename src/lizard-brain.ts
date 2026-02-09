@@ -26,11 +26,14 @@ export function initLizardBrain(config: LizardBrainConfig): void {
 // ============================================================================
 
 type Reminder = {
+  id: number;
   chatId: string;
   message: string;
   dueAt: number;
   setAt: number;
 };
+
+let _nextReminderId = 1;
 
 export type LizardBrain = {
   // Mood (0-100 each)
@@ -169,6 +172,71 @@ function parseReminderTime(text: string): { minutes: number; task: string } | nu
   return { minutes, task };
 }
 
+function parseReminderAt(text: string): { minutes: number; task: string; timeStr: string } | null {
+  // Match "remind me at 3pm to check oven" or "remind me at 15:00 to check oven"
+  const match = text.match(/remind\s+me\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+(?:to\s+)?(.+)/i);
+  if (!match) return null;
+
+  let hours = parseInt(match[1], 10);
+  const mins = match[2] ? parseInt(match[2], 10) : 0;
+  const ampm = match[3]?.toLowerCase();
+  const task = match[4].trim();
+
+  // Handle 12h format
+  if (ampm === "pm" && hours < 12) hours += 12;
+  if (ampm === "am" && hours === 12) hours = 0;
+
+  if (hours < 0 || hours > 23 || mins < 0 || mins > 59) return null;
+
+  const now = new Date();
+  const target = new Date(now);
+  target.setHours(hours, mins, 0, 0);
+
+  // If the time already passed today, schedule for tomorrow
+  if (target.getTime() <= now.getTime()) {
+    target.setDate(target.getDate() + 1);
+  }
+
+  const diffMs = target.getTime() - now.getTime();
+  const minutes = Math.ceil(diffMs / 60000);
+
+  const timeStr = `${hours.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}`;
+
+  return { minutes, task, timeStr };
+}
+
+export function formatDuration(minutes: number): string {
+  if (minutes >= 60) {
+    const h = Math.floor(minutes / 60);
+    const m = minutes % 60;
+    return m > 0 ? `${h}h ${m}m` : `${h} hour${h !== 1 ? "s" : ""}`;
+  }
+  return `${minutes} minute${minutes !== 1 ? "s" : ""}`;
+}
+
+export function addReminder(chatId: string, message: string, minutes: number): Reminder {
+  const reminder: Reminder = {
+    id: _nextReminderId++,
+    chatId,
+    message,
+    dueAt: Date.now() + minutes * 60 * 1000,
+    setAt: Date.now(),
+  };
+  lizardBrain.proactive.pendingReminders.push(reminder);
+  return reminder;
+}
+
+export function listReminders(chatId: string): Reminder[] {
+  return lizardBrain.proactive.pendingReminders.filter(r => r.chatId === chatId);
+}
+
+export function cancelReminder(chatId: string, id: number): boolean {
+  const idx = lizardBrain.proactive.pendingReminders.findIndex(r => r.chatId === chatId && r.id === id);
+  if (idx === -1) return false;
+  lizardBrain.proactive.pendingReminders.splice(idx, 1);
+  return true;
+}
+
 const quickPatterns: QuickPattern[] = [
   // Greetings
   {
@@ -212,7 +280,7 @@ const quickPatterns: QuickPattern[] = [
       return "I haven't said anything yet in this conversation!";
     },
   },
-  // Set reminder
+  // Set reminder (countdown: "remind me in 30 min to call mom")
   {
     patterns: [/remind\s+me\s+in\s+\d+/i],
     response: (chatId, match) => {
@@ -220,19 +288,32 @@ const quickPatterns: QuickPattern[] = [
       const parsed = parseReminderTime(text);
       if (!parsed) return null;
 
-      const dueAt = Date.now() + parsed.minutes * 60 * 1000;
-      lizardBrain.proactive.pendingReminders.push({
-        chatId,
-        message: parsed.task,
-        dueAt,
-        setAt: Date.now(),
-      });
+      const reminder = addReminder(chatId, parsed.task, parsed.minutes);
+      return `⏰ Got it! I'll remind you in ${formatDuration(parsed.minutes)} to: ${parsed.task} [#${reminder.id}]`;
+    },
+  },
+  // Set reminder (absolute: "remind me at 3pm to check oven")
+  {
+    patterns: [/remind\s+me\s+at\s+\d/i],
+    response: (chatId, match) => {
+      const text = match?.input || "";
+      const parsed = parseReminderAt(text);
+      if (!parsed) return null;
 
-      const timeStr = parsed.minutes >= 60
-        ? `${Math.floor(parsed.minutes / 60)} hour${parsed.minutes >= 120 ? "s" : ""}`
-        : `${parsed.minutes} minute${parsed.minutes !== 1 ? "s" : ""}`;
-
-      return `⏰ Got it! I'll remind you in ${timeStr} to: ${parsed.task}`;
+      const reminder = addReminder(chatId, parsed.task, parsed.minutes);
+      return `⏰ Got it! I'll remind you at ${parsed.timeStr} to: ${parsed.task} [#${reminder.id}]`;
+    },
+  },
+  // Catch-all for unrecognized "remind me" patterns
+  {
+    patterns: [/remind\s+me\s+/i],
+    response: () => {
+      return `I can help with reminders! Try:
+• "remind me in 30 min to call mom"
+• "remind me at 3pm to check oven"
+• /remind daily 08:00 Write journal
+• /remind weekly Mon 09:00 Standup
+• /remind list — see pending reminders`;
     },
   },
 ];
