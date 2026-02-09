@@ -17,6 +17,10 @@ import {
   createOrUpdateFile,
   type GitHubRepo, type GitHubIssue, type GitHubComment, type GitHubPullRequest,
 } from "./github.js";
+import {
+  loadLists, saveLists, findList, findItem, generateListId,
+  formatList, formatAllLists,
+} from "./lists.js";
 
 // ============================================================================
 // Web Search (Tavily)
@@ -195,6 +199,69 @@ const renameContactTool: Anthropic.Tool = {
       new_name: { type: "string", description: "New name for the contact" },
     },
     required: ["old_name", "new_name"],
+  },
+};
+
+const addToListTool: Anthropic.Tool = {
+  name: "add_to_list",
+  description: "Add items to a named list. Creates the list automatically if it doesn't exist. Use when the user mentions adding to a shopping list, to-do list, grocery list, packing list, or any named list.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      list_name: { type: "string", description: "Name of the list (e.g. 'Shopping', 'Groceries', 'Todo', 'Packing')" },
+      items: { type: "array", items: { type: "string" }, description: "Items to add to the list" },
+    },
+    required: ["list_name", "items"],
+  },
+};
+
+const removeFromListTool: Anthropic.Tool = {
+  name: "remove_from_list",
+  description: "Remove items from a named list by text match (case-insensitive partial match). Use when the user asks to remove or delete specific items from a list.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      list_name: { type: "string", description: "Name of the list" },
+      items: { type: "array", items: { type: "string" }, description: "Items to remove (matched by partial text)" },
+    },
+    required: ["list_name", "items"],
+  },
+};
+
+const checkListItemTool: Anthropic.Tool = {
+  name: "check_list_item",
+  description: "Toggle an item's done/undone status on a list. Use when the user says they've done something, bought something, or wants to check/uncheck an item.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      list_name: { type: "string", description: "Name of the list" },
+      item: { type: "string", description: "Item text to match (case-insensitive partial match)" },
+    },
+    required: ["list_name", "item"],
+  },
+};
+
+const showListTool: Anthropic.Tool = {
+  name: "show_list",
+  description: "Show a specific list's items or all lists. Use when the user asks what's on a list, asks to see their lists, or mentions checking a list.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      list_name: { type: "string", description: "Name of the list to show (omit to show all lists)" },
+    },
+    required: [],
+  },
+};
+
+const deleteListTool: Anthropic.Tool = {
+  name: "delete_list",
+  description: "Delete an entire list. Use when the user asks to delete, remove, or clear an entire list (not individual items).",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      list_name: { type: "string", description: "Name of the list to delete" },
+    },
+    required: ["list_name"],
   },
 };
 
@@ -393,7 +460,7 @@ const githubTools: Anthropic.Tool[] = [
 // ============================================================================
 
 export function getEnabledTools(): Anthropic.Tool[] {
-  const tools: Anthropic.Tool[] = [setReminderTool, listRemindersTool, cancelReminderTool, createEventTool, listEventsTool, tagEventTool, listContactsTool, renameContactTool, rememberFactTool, forgetFactTool];
+  const tools: Anthropic.Tool[] = [setReminderTool, listRemindersTool, cancelReminderTool, createEventTool, listEventsTool, tagEventTool, listContactsTool, renameContactTool, rememberFactTool, forgetFactTool, addToListTool, removeFromListTool, checkListItemTool, showListTool, deleteListTool];
   if (CONFIG.tavilyApiKey) tools.push(webSearchTool);
   if (isConnected()) tools.push(...gdriveTools);
   if (isGitHubConnected()) tools.push(...githubTools);
@@ -787,6 +854,86 @@ export async function executeToolCall(toolUse: Anthropic.ToolUseBlock, chatId: s
       const result = await createOrUpdateFile(repo, file_path, content, message, branch);
       return `File ${file_path} committed.\n${result.html_url}`;
     } catch (err) { return `Failed to write file: ${err}`; }
+  }
+
+  // ── List tools ──────────────────────────────────────────────────────
+
+  if (toolUse.name === "add_to_list") {
+    const { list_name, items } = toolUse.input as { list_name: string; items: string[] };
+    if (!list_name) return "Need a list name.";
+    if (!items || items.length === 0) return "Need at least one item to add.";
+    const data = loadLists();
+    let list = findList(data, list_name);
+    let created = false;
+    if (!list) {
+      list = { id: generateListId(), name: list_name.trim(), items: [], createdAt: Date.now() };
+      data.lists.push(list);
+      created = true;
+    }
+    for (const text of items) {
+      if (text.trim()) {
+        list.items.push({ id: generateListId(), text: text.trim(), done: false, addedAt: Date.now() });
+      }
+    }
+    saveLists(data);
+    console.log(`[lists] Added ${items.length} item(s) to "${list.name}"${created ? " (new list)" : ""}`);
+    return `${created ? `Created "${list.name}" and added` : `Added`} ${items.length} item${items.length !== 1 ? "s" : ""} to "${list.name}" (${list.items.length} total).`;
+  }
+
+  if (toolUse.name === "remove_from_list") {
+    const { list_name, items } = toolUse.input as { list_name: string; items: string[] };
+    if (!list_name) return "Need a list name.";
+    if (!items || items.length === 0) return "Need at least one item to remove.";
+    const data = loadLists();
+    const list = findList(data, list_name);
+    if (!list) return `List "${list_name}" not found.`;
+    const removed: string[] = [];
+    for (const text of items) {
+      const item = findItem(list, text);
+      if (item) {
+        list.items = list.items.filter(i => i.id !== item.id);
+        removed.push(item.text);
+      }
+    }
+    if (removed.length === 0) return `No matching items found in "${list.name}".`;
+    saveLists(data);
+    console.log(`[lists] Removed ${removed.length} item(s) from "${list.name}"`);
+    return `Removed from "${list.name}": ${removed.join(", ")} (${list.items.length} remaining).`;
+  }
+
+  if (toolUse.name === "check_list_item") {
+    const { list_name, item } = toolUse.input as { list_name: string; item: string };
+    if (!list_name || !item) return "Need both list_name and item.";
+    const data = loadLists();
+    const list = findList(data, list_name);
+    if (!list) return `List "${list_name}" not found.`;
+    const found = findItem(list, item);
+    if (!found) return `Item "${item}" not found in "${list.name}".`;
+    found.done = !found.done;
+    saveLists(data);
+    console.log(`[lists] ${found.done ? "Checked" : "Unchecked"} "${found.text}" in "${list.name}"`);
+    return `${found.done ? "☑" : "☐"} "${found.text}" ${found.done ? "done" : "undone"}.`;
+  }
+
+  if (toolUse.name === "show_list") {
+    const { list_name } = toolUse.input as { list_name?: string };
+    const data = loadLists();
+    if (!list_name) return formatAllLists(data);
+    const list = findList(data, list_name);
+    if (!list) return `List "${list_name}" not found. ${formatAllLists(data)}`;
+    return formatList(list);
+  }
+
+  if (toolUse.name === "delete_list") {
+    const { list_name } = toolUse.input as { list_name: string };
+    if (!list_name) return "Need a list name to delete.";
+    const data = loadLists();
+    const list = findList(data, list_name);
+    if (!list) return `List "${list_name}" not found.`;
+    data.lists = data.lists.filter(l => l.id !== list.id);
+    saveLists(data);
+    console.log(`[lists] Deleted list "${list.name}"`);
+    return `Deleted list "${list.name}".`;
   }
 
   return `Unknown tool: ${toolUse.name}`;

@@ -44,6 +44,7 @@ import {
   initGitHub, isConnected as isGitHubConnected,
   getConnectionStatus as getGitHubConnectionStatus,
 } from "./github.js";
+import { initLists } from "./lists.js";
 
 // ============================================================================
 // Chat (Claude API orchestration)
@@ -290,8 +291,9 @@ async function startWhatsApp(): Promise<void> {
   fs.mkdirSync(CONFIG.authDir, { recursive: true });
   fs.mkdirSync(CONFIG.sessionsDir, { recursive: true });
 
-  // Initialize calendar
+  // Initialize calendar & lists
   initCalendar(CONFIG.workspaceDir);
+  initLists(CONFIG.workspaceDir);
 
   // Initialize Google Drive (if configured)
   if (CONFIG.googleClientId && CONFIG.googleClientSecret) {

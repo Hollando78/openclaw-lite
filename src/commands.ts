@@ -20,6 +20,10 @@ import {
   isConnected as isGitHubConnected,
   getConnectionStatus as getGitHubConnectionStatus,
 } from "./github.js";
+import {
+  loadLists, saveLists, findList, findItem, generateListId,
+  formatList, formatAllLists,
+} from "./lists.js";
 
 // ============================================================================
 // Command Handling
@@ -79,6 +83,15 @@ Or just say: "remind me in 30 min to..."
 /contacts add - Add a contact (share a contact card)
 /contacts remove <name> - Remove a contact
 /contacts rename <old> to <new> - Rename a contact
+
+*Lists*
+/lists - Show all lists
+/list <name> - Show a specific list
+/list create <name> - Create a new list
+/list add <name> Item text - Add item to list
+/list check <name> Item - Mark item done
+/list clear <name> - Remove checked items
+/list delete <name> - Delete a list
 ${CONFIG.googleClientId ? `
 *Google Drive*
 /gdrive setup - Connect Google Drive
@@ -464,6 +477,129 @@ Or just say: "remind me in 30 min to call mom"`;
       }
 
       return "Usage:\n`/github status` - Check GitHub connection";
+    }
+
+    case "lists": {
+      const data = loadLists();
+      if (data.lists.length === 0) {
+        return "📝 No lists yet. Create one with `/list create <name>` or just say \"add milk to shopping list\".";
+      }
+      return `📝 *All Lists*\n\n${formatAllLists(data)}`;
+    }
+
+    case "list": {
+      const subCmd = args[0]?.toLowerCase();
+
+      // /list create <name>
+      if (subCmd === "create" || subCmd === "new") {
+        const name = args.slice(1).join(" ").trim();
+        if (!name) return "Usage: `/list create <name>`";
+        const data = loadLists();
+        if (findList(data, name)) return `List "${name}" already exists. Use \`/list ${name}\` to view it.`;
+        data.lists.push({ id: generateListId(), name, items: [], createdAt: Date.now() });
+        saveLists(data);
+        return `📝 Created list "${name}". Add items with \`/list add ${name} item text\`.`;
+      }
+
+      // /list add <name> <item>
+      if (subCmd === "add") {
+        const name = args[1];
+        const itemText = args.slice(2).join(" ").trim();
+        if (!name || !itemText) return "Usage: `/list add <name> item text`";
+        const data = loadLists();
+        let list = findList(data, name);
+        let created = false;
+        if (!list) {
+          list = { id: generateListId(), name: name.trim(), items: [], createdAt: Date.now() };
+          data.lists.push(list);
+          created = true;
+        }
+        list.items.push({ id: generateListId(), text: itemText, done: false, addedAt: Date.now() });
+        saveLists(data);
+        return `${created ? `📝 Created "${list.name}" and added` : "➕ Added"} "${itemText}" to ${list.name} (${list.items.length} item${list.items.length !== 1 ? "s" : ""}).`;
+      }
+
+      // /list remove <name> <item>
+      if (subCmd === "remove") {
+        const name = args[1];
+        const itemText = args.slice(2).join(" ").trim();
+        if (!name || !itemText) return "Usage: `/list remove <name> item text`";
+        const data = loadLists();
+        const list = findList(data, name);
+        if (!list) return `List "${name}" not found. Use \`/lists\` to see all lists.`;
+        const item = findItem(list, itemText);
+        if (!item) return `Item "${itemText}" not found in "${list.name}".`;
+        list.items = list.items.filter(i => i.id !== item.id);
+        saveLists(data);
+        return `🗑️ Removed "${item.text}" from "${list.name}" (${list.items.length} remaining).`;
+      }
+
+      // /list check <name> <item>
+      if (subCmd === "check" || subCmd === "done") {
+        const name = args[1];
+        const itemText = args.slice(2).join(" ").trim();
+        if (!name || !itemText) return "Usage: `/list check <name> item text`";
+        const data = loadLists();
+        const list = findList(data, name);
+        if (!list) return `List "${name}" not found.`;
+        const item = findItem(list, itemText);
+        if (!item) return `Item "${itemText}" not found in "${list.name}".`;
+        item.done = true;
+        saveLists(data);
+        return `☑ "${item.text}" done.`;
+      }
+
+      // /list uncheck <name> <item>
+      if (subCmd === "uncheck" || subCmd === "undo") {
+        const name = args[1];
+        const itemText = args.slice(2).join(" ").trim();
+        if (!name || !itemText) return "Usage: `/list uncheck <name> item text`";
+        const data = loadLists();
+        const list = findList(data, name);
+        if (!list) return `List "${name}" not found.`;
+        const item = findItem(list, itemText);
+        if (!item) return `Item "${itemText}" not found in "${list.name}".`;
+        item.done = false;
+        saveLists(data);
+        return `☐ "${item.text}" undone.`;
+      }
+
+      // /list clear <name> — remove all checked items
+      if (subCmd === "clear") {
+        const name = args.slice(1).join(" ").trim();
+        if (!name) return "Usage: `/list clear <name>`";
+        const data = loadLists();
+        const list = findList(data, name);
+        if (!list) return `List "${name}" not found.`;
+        const before = list.items.length;
+        list.items = list.items.filter(i => !i.done);
+        const removed = before - list.items.length;
+        if (removed === 0) return `No checked items to clear in "${list.name}".`;
+        saveLists(data);
+        return `🧹 Cleared ${removed} checked item${removed !== 1 ? "s" : ""} from "${list.name}" (${list.items.length} remaining).`;
+      }
+
+      // /list delete <name> — delete entire list
+      if (subCmd === "delete") {
+        const name = args.slice(1).join(" ").trim();
+        if (!name) return "Usage: `/list delete <name>`";
+        const data = loadLists();
+        const list = findList(data, name);
+        if (!list) return `List "${name}" not found.`;
+        data.lists = data.lists.filter(l => l.id !== list.id);
+        saveLists(data);
+        return `🗑️ Deleted list "${list.name}".`;
+      }
+
+      // /list <name> — show a specific list (default if no recognized subcommand)
+      if (subCmd) {
+        const data = loadLists();
+        const list = findList(data, args.join(" "));
+        if (list) return `📝 ${formatList(list)}`;
+        return `List "${args.join(" ")}" not found. Use \`/lists\` to see all lists or \`/list create ${args.join(" ")}\` to create one.`;
+      }
+
+      return `Usage: \`/list create|add|remove|check|clear|delete ...\`\nOr \`/list <name>\` to show a list.\nType \`/help\` for details.`;
     }
 
     case "contacts":
