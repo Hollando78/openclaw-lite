@@ -673,13 +673,13 @@ async function startWhatsApp(): Promise<void> {
           console.log(`[doc] Processed ${result.fileName} (${result.content.kind})`);
 
           // Token budget pre-check for large documents
+          // Don't block the message — just skip sending doc content to Claude
+          // so save_to_drive and other tools can still work
           const estimatedTokens = estimateDocumentTokens(result.content);
           const projectedUsage = (lizardBrain.tokens.used + estimatedTokens) / lizardBrain.tokens.budget;
           if (projectedUsage > 0.9) {
-            await sock.sendMessage(chatId, {
-              text: "🦞 That document looks large and would use up most of my remaining thinking budget for today. Could you ask me about specific parts instead, or send a smaller excerpt?",
-            });
-            continue;
+            mediaContent = undefined; // drop the heavy content, keep the text flowing
+            if (!text) text = `[Document: ${result.fileName}] (too large to analyze — budget low)`;
           }
         }
 
