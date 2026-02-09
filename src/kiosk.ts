@@ -712,6 +712,17 @@ function generateKioskCSS(): string {
 
     /* Lobster Animations */
 
+    /* Fix SVG transform-box: make transforms relative to each element's
+       bounding box, not the entire SVG viewBox. Without this, scaleY/rotate
+       animations on SVG children use the viewBox origin (0,0) instead of
+       the element's own center. */
+    .eye-lid, .eye-white, .eye-pupil, .eye-shine,
+    .mouth-smile, .claw-left, .claw-right,
+    .antennae, .eyes, .legs, .head, .tail {
+      transform-box: fill-box;
+      transform-origin: center center;
+    }
+
     /* Base idle animation - gentle bobbing */
     .lobster-svg {
       animation: idle-bob 3s ease-in-out infinite;
@@ -762,7 +773,6 @@ function generateKioskCSS(): string {
     /* Claw wave animation (occasional) */
     .claw-right {
       animation: claw-wave 8s ease-in-out infinite;
-      transform-origin: right center;
     }
 
     @keyframes claw-wave {
@@ -845,7 +855,6 @@ function generateKioskCSS(): string {
     /* Curious state - perked up */
     [data-state="curious"] .lobster-svg {
       animation: curious-bob 2s ease-in-out infinite;
-      transform: scale(1.02);
     }
 
     [data-state="curious"] .antennae {
@@ -962,7 +971,7 @@ function generateKioskCSS(): string {
 
     /* Receiving state - perked up, antenna alert */
     [data-state="receiving"] .lobster-svg {
-      animation: receiving-perk 0.3s ease-out forwards;
+      animation: receiving-perk 0.8s ease-in-out infinite;
     }
 
     [data-state="receiving"] .antennae {
@@ -970,12 +979,12 @@ function generateKioskCSS(): string {
     }
 
     [data-state="receiving"] .eyes {
-      animation: eyes-widen 0.3s ease-out forwards;
+      animation: eyes-widen 0.8s ease-in-out infinite;
     }
 
     @keyframes receiving-perk {
-      0% { transform: translateY(0) scale(1); }
-      100% { transform: translateY(-8px) scale(1.05); }
+      0%, 100% { transform: translateY(-4px) scale(1.03); }
+      50% { transform: translateY(-8px) scale(1.05); }
     }
 
     @keyframes antenna-alert {
@@ -984,8 +993,8 @@ function generateKioskCSS(): string {
     }
 
     @keyframes eyes-widen {
-      0% { transform: scale(1); }
-      100% { transform: scale(1.1); }
+      0%, 100% { transform: scale(1.05); }
+      50% { transform: scale(1.1); }
     }
 
     /* Thinking state - thoughtful, claw tapping */
@@ -995,7 +1004,6 @@ function generateKioskCSS(): string {
 
     [data-state="thinking"] .claw-right {
       animation: claw-tap 0.6s ease-in-out infinite;
-      transform-origin: center center;
     }
 
     [data-state="thinking"] .eye-pupil {
@@ -1018,9 +1026,9 @@ function generateKioskCSS(): string {
       75% { transform: translateX(2px) translateY(-1px); }
     }
 
-    /* Sending state - bounce, gesturing */
+    /* Sending state - bounce then bob, gesturing */
     [data-state="sending"] .lobster-svg {
-      animation: sending-bounce 0.4s ease-out;
+      animation: sending-bounce 1.5s ease-out infinite;
     }
 
     [data-state="sending"] .claw-left,
@@ -1034,9 +1042,11 @@ function generateKioskCSS(): string {
 
     @keyframes sending-bounce {
       0% { transform: translateY(0) scale(1); }
-      30% { transform: translateY(-10px) scale(1.05); }
-      60% { transform: translateY(-5px) scale(1.02); }
-      100% { transform: translateY(0) scale(1); }
+      15% { transform: translateY(-10px) scale(1.05); }
+      30% { transform: translateY(-3px) scale(1.02); }
+      50% { transform: translateY(0) scale(1); }
+      75% { transform: translateY(-3px); }
+      100% { transform: translateY(0); }
     }
 
     @keyframes claw-gesture {
@@ -1416,6 +1426,7 @@ function generateKioskCSS(): string {
     .b1 { animation-delay: 0s; animation-duration: 4s; }
     .b2 { animation-delay: 1.3s; animation-duration: 5s; }
     .b3 { animation-delay: 2.6s; animation-duration: 3.5s; }
+    .b4 { animation-delay: 3.5s; animation-duration: 4.5s; }
 
     /* Responsive adjustments */
     @media (max-width: 380px) {
