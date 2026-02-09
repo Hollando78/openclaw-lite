@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { CONFIG } from "./config.js";
-import { addReminder, formatDuration } from "./lizard-brain.js";
+import { addReminder, listReminders, cancelReminder, formatDuration } from "./lizard-brain.js";
 import { loadMemory, saveMemory, isValidUserFact, sanitizeFact } from "./memory.js";
 import {
   loadCalendar, saveCalendar, generateEventId,
@@ -113,6 +113,50 @@ const rememberFactTool: Anthropic.Tool = {
     type: "object" as const,
     properties: {
       fact: { type: "string", description: "A concise fact about the user (e.g. 'Has two kids named Max and Lily')" },
+    },
+    required: ["fact"],
+  },
+};
+
+const listRemindersTool: Anthropic.Tool = {
+  name: "list_reminders",
+  description: "List the user's pending reminders. Use when the user asks what reminders they have, or when you need to reference existing reminders (e.g. before cancelling one).",
+  input_schema: {
+    type: "object" as const,
+    properties: {},
+    required: [],
+  },
+};
+
+const cancelReminderTool: Anthropic.Tool = {
+  name: "cancel_reminder",
+  description: "Cancel a pending reminder by its ID. Use when the user asks to cancel or remove a reminder. Use list_reminders first if you need to find the ID.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      reminder_id: { type: "number", description: "The reminder ID to cancel" },
+    },
+    required: ["reminder_id"],
+  },
+};
+
+const listEventsTool: Anthropic.Tool = {
+  name: "list_events",
+  description: "List all calendar events. Use when the user asks about their schedule, upcoming events, or what's on their calendar.",
+  input_schema: {
+    type: "object" as const,
+    properties: {},
+    required: [],
+  },
+};
+
+const forgetFactTool: Anthropic.Tool = {
+  name: "forget_fact",
+  description: "Remove a specific fact from the user's long-term memory. Use when the user corrects outdated information (e.g. 'I moved to London' → forget the old city fact and remember the new one) or explicitly asks you to forget something.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      fact: { type: "string", description: "The fact to remove (must match an existing stored fact, case-insensitive)" },
     },
     required: ["fact"],
   },
@@ -313,7 +357,7 @@ const githubTools: Anthropic.Tool[] = [
 // ============================================================================
 
 export function getEnabledTools(): Anthropic.Tool[] {
-  const tools: Anthropic.Tool[] = [setReminderTool, createEventTool, rememberFactTool];
+  const tools: Anthropic.Tool[] = [setReminderTool, listRemindersTool, cancelReminderTool, createEventTool, listEventsTool, rememberFactTool, forgetFactTool];
   if (CONFIG.tavilyApiKey) tools.push(webSearchTool);
   if (isConnected()) tools.push(...gdriveTools);
   if (isGitHubConnected()) tools.push(...githubTools);
@@ -385,6 +429,61 @@ export async function executeToolCall(toolUse: Anthropic.ToolUseBlock, chatId: s
     saveMemory(chatId, memory);
     console.log(`[memory] Tool stored fact for ${chatId}: "${clean}"`);
     return `Remembered: "${clean}"`;
+  }
+
+  if (toolUse.name === "list_reminders") {
+    const reminders = listReminders(chatId);
+    if (reminders.length === 0) return "No pending reminders.";
+    return reminders.map(r => {
+      const minsLeft = Math.max(0, Math.ceil((r.dueAt - Date.now()) / 60000));
+      return `#${r.id}. "${r.message}" — in ${formatDuration(minsLeft)}`;
+    }).join("\n");
+  }
+
+  if (toolUse.name === "cancel_reminder") {
+    const { reminder_id } = toolUse.input as { reminder_id: number };
+    if (cancelReminder(chatId, reminder_id)) {
+      console.log(`[reminder] Tool cancelled reminder #${reminder_id} for ${chatId}`);
+      return `Reminder #${reminder_id} cancelled.`;
+    }
+    return `Reminder #${reminder_id} not found.`;
+  }
+
+  if (toolUse.name === "list_events") {
+    const cal = loadCalendar();
+    if (cal.events.length === 0) return "No calendar events.";
+    return cal.events.map(evt => {
+      const tagged = evt.taggedUsers.length > 0
+        ? ` (${evt.taggedUsers.map(u => u.name).join(", ")})`
+        : "";
+      let schedule = "";
+      if (evt.recurrence === "daily") schedule = `Daily at ${evt.time}`;
+      else if (evt.recurrence === "weekly") schedule = `Every ${DAY_NAMES_SHORT[evt.dayOfWeek!]} at ${evt.time}`;
+      else schedule = `${evt.date} at ${evt.time}`;
+      return `"${evt.title}" [${evt.id}] — ${schedule}${tagged}${evt.actionable ? " (actionable)" : ""}`;
+    }).join("\n");
+  }
+
+  if (toolUse.name === "forget_fact") {
+    const { fact } = toolUse.input as { fact: string };
+    if (!fact || fact.trim().length === 0) return "No fact provided.";
+    const memory = loadMemory(chatId);
+    const idx = memory.facts.findIndex(f => f.toLowerCase() === fact.trim().toLowerCase());
+    if (idx === -1) {
+      // Try partial match
+      const partialIdx = memory.facts.findIndex(f => f.toLowerCase().includes(fact.trim().toLowerCase()));
+      if (partialIdx === -1) return `No matching fact found. Current facts:\n${memory.facts.map(f => `• ${f}`).join("\n") || "(none)"}`;
+      const removed = memory.facts.splice(partialIdx, 1)[0];
+      memory.lastUpdated = Date.now();
+      saveMemory(chatId, memory);
+      console.log(`[memory] Tool removed fact for ${chatId}: "${removed}"`);
+      return `Forgot: "${removed}"`;
+    }
+    const removed = memory.facts.splice(idx, 1)[0];
+    memory.lastUpdated = Date.now();
+    saveMemory(chatId, memory);
+    console.log(`[memory] Tool removed fact for ${chatId}: "${removed}"`);
+    return `Forgot: "${removed}"`;
   }
 
   if (toolUse.name === "web_search") {
