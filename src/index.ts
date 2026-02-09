@@ -10,6 +10,7 @@
 
 import makeWASocket, {
   DisconnectReason,
+  downloadMediaMessage,
   useMultiFileAuthState,
   type WAMessage,
 } from "@whiskeysockets/baileys";
@@ -18,7 +19,7 @@ import qrcode from "qrcode-terminal";
 import * as fs from "fs";
 import * as path from "path";
 
-import { CONFIG, status, addError, getClient, setSendMessageFn, type MediaContent } from "./config.js";
+import { CONFIG, status, addError, getClient, setSendMessageFn, setSendFileFn, setPendingUpload, pendingUploads, type MediaContent } from "./config.js";
 import { downloadImage, downloadDocument, estimateDocumentTokens, downloadAudio, transcribeAudio } from "./media.js";
 import { buildSystemPrompt } from "./soul.js";
 import { addToSession, compressHistoryIfNeeded, getCompressedHistory, loadSession } from "./session.js";
@@ -384,6 +385,15 @@ async function startWhatsApp(): Promise<void> {
       };
       setSendMessageFn(sendMessageFn);
 
+      setSendFileFn(async (chatId, buffer, fileName, mimeType, caption) => {
+        if (mimeType.startsWith("image/")) {
+          await sock.sendMessage(chatId, { image: buffer, caption });
+        } else {
+          await sock.sendMessage(chatId, { document: buffer, fileName, mimetype: mimeType, caption });
+        }
+        status.messagesSent++;
+      });
+
       startLizardLoop(
         sendMessageFn,
         async () => {
@@ -416,6 +426,11 @@ async function startWhatsApp(): Promise<void> {
           for (const [chatId, state] of pendingContactAdd.entries()) {
             if (Date.now() > state.expiresAt) {
               pendingContactAdd.delete(chatId);
+            }
+          }
+          for (const [chatId, state] of pendingUploads.entries()) {
+            if (Date.now() > state.expiresAt) {
+              pendingUploads.delete(chatId);
             }
           }
         },
@@ -628,6 +643,10 @@ async function startWhatsApp(): Promise<void> {
           if (downloaded) {
             mediaContent = { type: "image", image: downloaded };
             console.log(`[image] Downloaded ${(downloaded.data.length / 1024).toFixed(1)}KB`);
+            // Store raw buffer for potential save-to-drive
+            const imgMime = msg.message?.imageMessage?.mimetype || "image/jpeg";
+            const imgExt = imgMime.includes("png") ? ".png" : imgMime.includes("webp") ? ".webp" : ".jpg";
+            setPendingUpload(chatId, Buffer.from(downloaded.data, "base64"), `image${imgExt}`, imgMime);
           } else {
             await sock.sendMessage(chatId, { text: "🦞 Sorry, I couldn't process that image." });
             continue;
@@ -637,6 +656,14 @@ async function startWhatsApp(): Promise<void> {
         // Download document if present
         if (hasDocument) {
           console.log(`[doc] Downloading "${docMessage?.fileName}" from ${senderId}`);
+          // Store raw buffer for potential save-to-drive (before processing)
+          try {
+            const rawBuffer = await downloadMediaMessage(msg, "buffer", {}) as Buffer;
+            const docMime = docMessage?.mimetype || "application/octet-stream";
+            const docName = docMessage?.fileName || "document";
+            setPendingUpload(chatId, rawBuffer, docName, docMime);
+          } catch { /* ignore - save-to-drive just won't work for this message */ }
+
           const result = await downloadDocument(msg);
           if (typeof result === "string") {
             await sock.sendMessage(chatId, { text: `🦞 ${result}` });

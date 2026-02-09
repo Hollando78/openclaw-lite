@@ -145,6 +145,43 @@ export function setSendMessageFn(fn: ((chatId: string, text: string) => Promise<
 }
 
 // ============================================================================
+// sendFileFn (for sending media/documents back to WhatsApp)
+// ============================================================================
+
+type SendFileFn = (chatId: string, buffer: Buffer, fileName: string, mimeType: string, caption?: string) => Promise<void>;
+
+let _sendFileFn: SendFileFn | null = null;
+
+export function getSendFileFn(): SendFileFn | null {
+  return _sendFileFn;
+}
+
+export function setSendFileFn(fn: SendFileFn | null): void {
+  _sendFileFn = fn;
+}
+
+// ============================================================================
+// Pending Upload (stores raw media buffer for save_to_drive tool)
+// ============================================================================
+
+export type PendingUpload = { buffer: Buffer; fileName: string; mimeType: string; expiresAt: number };
+
+const _pendingUploads = new Map<string, PendingUpload>();
+
+export function setPendingUpload(chatId: string, buffer: Buffer, fileName: string, mimeType: string): void {
+  _pendingUploads.set(chatId, { buffer, fileName, mimeType, expiresAt: Date.now() + 300_000 });
+}
+
+export function consumePendingUpload(chatId: string): PendingUpload | null {
+  const p = _pendingUploads.get(chatId);
+  if (!p || Date.now() > p.expiresAt) { _pendingUploads.delete(chatId); return null; }
+  _pendingUploads.delete(chatId);
+  return p;
+}
+
+export const pendingUploads = _pendingUploads;
+
+// ============================================================================
 // Claude API Client
 // ============================================================================
 

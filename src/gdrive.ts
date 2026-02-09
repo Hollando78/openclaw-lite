@@ -284,6 +284,122 @@ export async function listFiles(folderId?: string, pageSize: number = 20): Promi
 }
 
 // ============================================================================
+// File Upload / Download (binary)
+// ============================================================================
+
+let _cachedFolderId: string | null = null;
+
+async function getOrCreateFolder(): Promise<string> {
+  // Check in-memory cache
+  if (_cachedFolderId) return _cachedFolderId;
+
+  // Check disk cache
+  const cachePath = path.join(_config.workspaceDir, "drive-folder-id.txt");
+  try {
+    const cached = fs.readFileSync(cachePath, "utf-8").trim();
+    if (cached) { _cachedFolderId = cached; return cached; }
+  } catch { /* ignore */ }
+
+  // Search for existing folder
+  const existing = await searchFiles("name='ChadGPT Files' and mimeType='application/vnd.google-apps.folder' and trashed=false");
+  if (existing.length > 0) {
+    _cachedFolderId = existing[0].id;
+    fs.writeFileSync(cachePath, existing[0].id);
+    return existing[0].id;
+  }
+
+  // Create new folder
+  const folder = await driveRequest("files", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "ChadGPT Files", mimeType: "application/vnd.google-apps.folder" }),
+  }) as { id: string };
+
+  _cachedFolderId = folder.id;
+  fs.writeFileSync(cachePath, folder.id);
+  console.log(`[gdrive] Created "ChadGPT Files" folder: ${folder.id}`);
+  return folder.id;
+}
+
+export async function uploadFile(
+  name: string, buffer: Buffer, mimeType: string
+): Promise<{ id: string; name: string; webViewLink?: string }> {
+  const token = await getAccessToken();
+  const folderId = await getOrCreateFolder();
+
+  const boundary = "openclaw_" + Date.now();
+  const metadata = JSON.stringify({ name, mimeType, parents: [folderId] });
+
+  const body = Buffer.concat([
+    Buffer.from(
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n` +
+      `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`
+    ),
+    buffer,
+    Buffer.from(`\r\n--${boundary}--`),
+  ]);
+
+  const res = await fetch(
+    `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`,
+      },
+      body,
+    }
+  );
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Drive upload failed ${res.status}: ${errText.slice(0, 200)}`);
+  }
+
+  const result = await res.json() as { id: string; name: string; webViewLink?: string };
+  console.log(`[gdrive] Uploaded "${name}" (${(buffer.length / 1024).toFixed(1)}KB) → ${result.id}`);
+  return result;
+}
+
+export async function downloadFile(
+  fileId: string
+): Promise<{ buffer: Buffer; name: string; mimeType: string }> {
+  const token = await getAccessToken();
+
+  // Get metadata
+  const meta = await driveRequest(`files/${fileId}?fields=name,mimeType,size`) as {
+    name: string; mimeType: string; size?: string;
+  };
+
+  // Google Docs/Sheets/Slides need to be exported
+  if (meta.mimeType.startsWith("application/vnd.google-apps.")) {
+    const exportMime = meta.mimeType.includes("document") ? "application/pdf"
+      : meta.mimeType.includes("spreadsheet") ? "text/csv"
+      : meta.mimeType.includes("presentation") ? "application/pdf"
+      : "application/pdf";
+    const exportName = meta.name + (exportMime === "text/csv" ? ".csv" : ".pdf");
+
+    const res = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=${encodeURIComponent(exportMime)}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!res.ok) throw new Error(`Drive export failed ${res.status}`);
+    const arrayBuffer = await res.arrayBuffer();
+    return { buffer: Buffer.from(arrayBuffer), name: exportName, mimeType: exportMime };
+  }
+
+  // Regular file download
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!res.ok) throw new Error(`Drive download failed ${res.status}`);
+  const arrayBuffer = await res.arrayBuffer();
+  console.log(`[gdrive] Downloaded "${meta.name}" (${(arrayBuffer.byteLength / 1024).toFixed(1)}KB)`);
+  return { buffer: Buffer.from(arrayBuffer), name: meta.name, mimeType: meta.mimeType };
+}
+
+// ============================================================================
 // Docs Operations
 // ============================================================================
 

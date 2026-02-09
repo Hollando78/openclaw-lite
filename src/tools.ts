@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { CONFIG, getSendMessageFn } from "./config.js";
+import { CONFIG, getSendMessageFn, getSendFileFn, consumePendingUpload } from "./config.js";
 import { addReminder, listReminders, cancelReminder, formatDuration } from "./lizard-brain.js";
 import { loadMemory, saveMemory, isValidUserFact, sanitizeFact } from "./memory.js";
 import {
@@ -8,7 +8,7 @@ import {
 } from "./calendar.js";
 import {
   isConnected, searchFiles, listFiles, readDocAsText,
-  createDoc, updateDoc, extractFileId, type DriveFile,
+  createDoc, updateDoc, extractFileId, uploadFile, downloadFile, type DriveFile,
 } from "./gdrive.js";
 import {
   isConnected as isGitHubConnected,
@@ -335,6 +335,28 @@ const gdriveTools: Anthropic.Tool[] = [
         mode: { type: "string", enum: ["append", "replace"], description: "'append' to add to end, 'replace' to overwrite" },
       },
       required: ["file_id", "content", "mode"],
+    },
+  },
+  {
+    name: "save_to_drive",
+    description: "Save the attached file or image to Google Drive. Use when the user sends a file/image and asks to save, upload, or store it on Drive. The file must be attached in the same message or sent just before.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        filename: { type: "string", description: "Optional filename override (if omitted, uses original filename)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "get_from_drive",
+    description: "Download a file from Google Drive and send it to the user as a WhatsApp attachment (not a link). Use when the user asks to get, retrieve, download, or send a file from Drive. Use gdrive_search or gdrive_list first to find the file ID.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        file_id: { type: "string", description: "Google Drive file ID" },
+      },
+      required: ["file_id"],
     },
   },
 ];
@@ -755,6 +777,35 @@ export async function executeToolCall(toolUse: Anthropic.ToolUseBlock, chatId: s
       await updateDoc(resolvedId, content, mode);
       return `Document updated (${mode}).`;
     } catch (err) { return `Failed to update document: ${err}`; }
+  }
+
+  if (toolUse.name === "save_to_drive") {
+    if (!isConnected()) return "Google Drive not connected. Use /gdrive setup first.";
+    const { filename } = toolUse.input as { filename?: string };
+    const pending = consumePendingUpload(chatId);
+    if (!pending) return "No file attached. Send a file or image first, then ask me to save it to Drive.";
+    try {
+      const name = filename || pending.fileName;
+      console.log(`[gdrive] Uploading "${name}" (${(pending.buffer.length / 1024).toFixed(1)}KB) to Drive`);
+      const result = await uploadFile(name, pending.buffer, pending.mimeType);
+      return `Saved "${result.name}" to Google Drive (ChadGPT Files folder).`;
+    } catch (err) { return `Failed to upload to Drive: ${err}`; }
+  }
+
+  if (toolUse.name === "get_from_drive") {
+    if (!isConnected()) return "Google Drive not connected. Use /gdrive setup first.";
+    const { file_id } = toolUse.input as { file_id: string };
+    if (!file_id) return "Need a file_id. Use gdrive_search or gdrive_list to find it.";
+    const resolvedId = extractFileId(file_id) || file_id;
+    try {
+      console.log(`[gdrive] Downloading file ${resolvedId} from Drive`);
+      const file = await downloadFile(resolvedId);
+      const sendFileFn = getSendFileFn();
+      if (!sendFileFn) return "Cannot send files right now (WhatsApp not ready).";
+      await sendFileFn(chatId, file.buffer, file.name, file.mimeType);
+      console.log(`[gdrive] Sent "${file.name}" (${(file.buffer.length / 1024).toFixed(1)}KB) to ${chatId}`);
+      return `Sent "${file.name}" to you.`;
+    } catch (err) { return `Failed to get file from Drive: ${err}`; }
   }
 
   if (toolUse.name === "github_list_repos") {
