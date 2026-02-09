@@ -91,7 +91,7 @@ const setReminderTool: Anthropic.Tool = {
 
 const createEventTool: Anthropic.Tool = {
   name: "create_event",
-  description: "Create a calendar event. Use this when the user mentions an appointment, meeting, recurring activity, or any scheduled event. Supports daily, weekly, and one-time events.",
+  description: "Create a calendar event. Use this when the user mentions an appointment, meeting, recurring activity, or any scheduled event. Supports daily, weekly, and one-time events. Set actionable=true for recurring reminders where the bot should actively respond (e.g. 'write in journal daily') vs. just sending a notification.",
   input_schema: {
     type: "object" as const,
     properties: {
@@ -100,6 +100,7 @@ const createEventTool: Anthropic.Tool = {
       time: { type: "string", description: "Time in HH:MM 24-hour format (e.g. '14:30')" },
       day_of_week: { type: "string", description: "Day of week for weekly events: sun, mon, tue, wed, thu, fri, sat" },
       date: { type: "string", description: "Date for one-time events in YYYY-MM-DD format (e.g. '2026-03-15')" },
+      actionable: { type: "boolean", description: "If true, the bot will process this event through Claude when it fires (like a smart reminder). If false (default), it only appears in calendar digests." },
     },
     required: ["title", "recurrence", "time"],
   },
@@ -329,40 +330,41 @@ export async function executeToolCall(toolUse: Anthropic.ToolUseBlock, chatId: s
   }
 
   if (toolUse.name === "create_event") {
-    const { title, recurrence, time, day_of_week, date } = toolUse.input as {
-      title: string; recurrence: string; time: string; day_of_week?: string; date?: string;
+    const { title, recurrence, time, day_of_week, date, actionable } = toolUse.input as {
+      title: string; recurrence: string; time: string; day_of_week?: string; date?: string; actionable?: boolean;
     };
     if (!title || !recurrence || !time) return "Invalid event: need title, recurrence, and time.";
     if (!/^\d{2}:\d{2}$/.test(time)) return "Invalid time format. Use HH:MM (e.g. '14:30').";
+    const isActionable = actionable || false;
 
     if (recurrence === "weekly") {
       const dayOfWeek = day_of_week ? DAY_MAP[day_of_week.toLowerCase()] : undefined;
       if (dayOfWeek === undefined) return "Weekly events need a day_of_week (e.g. 'mon', 'tue').";
       const id = generateEventId();
       const cal = loadCalendar();
-      cal.events.push({ id, title, recurrence: "weekly", dayOfWeek, time, taggedUsers: [], createdBy: chatId, createdAt: Date.now(), chatId });
+      cal.events.push({ id, title, recurrence: "weekly", dayOfWeek, time, taggedUsers: [], createdBy: chatId, createdAt: Date.now(), chatId, ...(isActionable && { actionable: true }) });
       saveCalendar(cal);
-      console.log(`[calendar] Tool created weekly event "${title}" ${DAY_NAMES_SHORT[dayOfWeek]} ${time} [${id}]`);
-      return `Event created: "${title}" every ${DAY_NAMES_SHORT[dayOfWeek]} at ${time} [${id}]. Remove with /event remove ${id}`;
+      console.log(`[calendar] Tool created weekly${isActionable ? " actionable" : ""} event "${title}" ${DAY_NAMES_SHORT[dayOfWeek]} ${time} [${id}]`);
+      return `Event created: "${title}" every ${DAY_NAMES_SHORT[dayOfWeek]} at ${time}${isActionable ? " (actionable)" : ""} [${id}]. Remove with /event remove ${id}`;
     }
 
     if (recurrence === "once") {
       if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return "One-time events need a date in YYYY-MM-DD format.";
       const id = generateEventId();
       const cal = loadCalendar();
-      cal.events.push({ id, title, recurrence: "once", date, time, taggedUsers: [], createdBy: chatId, createdAt: Date.now(), chatId });
+      cal.events.push({ id, title, recurrence: "once", date, time, taggedUsers: [], createdBy: chatId, createdAt: Date.now(), chatId, ...(isActionable && { actionable: true }) });
       saveCalendar(cal);
-      console.log(`[calendar] Tool created one-time event "${title}" ${date} ${time} [${id}]`);
-      return `Event created: "${title}" on ${date} at ${time} [${id}]. Remove with /event remove ${id}`;
+      console.log(`[calendar] Tool created one-time${isActionable ? " actionable" : ""} event "${title}" ${date} ${time} [${id}]`);
+      return `Event created: "${title}" on ${date} at ${time}${isActionable ? " (actionable)" : ""} [${id}]. Remove with /event remove ${id}`;
     }
 
     if (recurrence === "daily") {
       const id = generateEventId();
       const cal = loadCalendar();
-      cal.events.push({ id, title, recurrence: "daily", time, taggedUsers: [], createdBy: chatId, createdAt: Date.now(), chatId });
+      cal.events.push({ id, title, recurrence: "daily", time, taggedUsers: [], createdBy: chatId, createdAt: Date.now(), chatId, ...(isActionable && { actionable: true }) });
       saveCalendar(cal);
-      console.log(`[calendar] Tool created daily event "${title}" ${time} [${id}]`);
-      return `Event created: "${title}" daily at ${time} [${id}]. Remove with /event remove ${id}`;
+      console.log(`[calendar] Tool created daily${isActionable ? " actionable" : ""} event "${title}" ${time} [${id}]`);
+      return `Event created: "${title}" daily at ${time}${isActionable ? " (actionable)" : ""} [${id}]. Remove with /event remove ${id}`;
     }
 
     return "Invalid recurrence. Use 'daily', 'weekly', or 'once'.";
