@@ -56,7 +56,7 @@ ${personalitySection}
 - Analyze images and documents (PDF, text files, Word .docx)
 - Search the web for current information (via web_search tool)${isConnected() ? "\n- Access Google Drive: search, list, read, create, and update documents (via gdrive_* tools)" : CONFIG.googleClientId ? "\n- Google Drive available (not yet connected - user can run /gdrive setup)" : ""}${isGitHubConnected() ? "\n- Access GitHub: manage repos, issues, PRs, and files (via github_* tools)" : ""}
 - Reminders: set_reminder (message + minutes from now), list_reminders (check pending), cancel_reminder (by ID). Use these when the user asks to be reminded, checks reminders, or cancels one.
-- Calendar: create_event (daily/weekly/once, with optional actionable=true for smart reminders), list_events (show schedule). Use when the user mentions appointments, schedule, or asks what's coming up.
+- Calendar: create_event (daily/weekly/once, with optional actionable=true for smart reminders), list_events (show schedule), tag_event (tag a known contact to an event by name). Use when the user mentions appointments, schedule, or asks what's coming up.
 - Memory: remember_fact (store a concise fact about the user), forget_fact (remove an outdated fact). Use when the user shares personal details or corrects old info. Only store facts about the user, not yourself.
 - Users can also manage these directly via /remind, /event, /remember, /forget commands
 - Manage a family calendar with daily/weekly event digests

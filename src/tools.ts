@@ -162,6 +162,19 @@ const forgetFactTool: Anthropic.Tool = {
   },
 };
 
+const tagEventTool: Anthropic.Tool = {
+  name: "tag_event",
+  description: "Tag a known contact to a calendar event. Only works for contacts who have been previously tagged to other events (their name and number are already known). Use list_events first to see existing events and their tagged contacts, then use this to tag a known contact to another event by name.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      event_id: { type: "string", description: "The event ID to tag the contact to" },
+      contact_name: { type: "string", description: "The contact's name (case-insensitive partial match against known contacts)" },
+    },
+    required: ["event_id", "contact_name"],
+  },
+};
+
 const gdriveTools: Anthropic.Tool[] = [
   {
     name: "gdrive_search",
@@ -357,7 +370,7 @@ const githubTools: Anthropic.Tool[] = [
 // ============================================================================
 
 export function getEnabledTools(): Anthropic.Tool[] {
-  const tools: Anthropic.Tool[] = [setReminderTool, listRemindersTool, cancelReminderTool, createEventTool, listEventsTool, rememberFactTool, forgetFactTool];
+  const tools: Anthropic.Tool[] = [setReminderTool, listRemindersTool, cancelReminderTool, createEventTool, listEventsTool, tagEventTool, rememberFactTool, forgetFactTool];
   if (CONFIG.tavilyApiKey) tools.push(webSearchTool);
   if (isConnected()) tools.push(...gdriveTools);
   if (isGitHubConnected()) tools.push(...githubTools);
@@ -462,6 +475,48 @@ export async function executeToolCall(toolUse: Anthropic.ToolUseBlock, chatId: s
       else schedule = `${evt.date} at ${evt.time}`;
       return `"${evt.title}" [${evt.id}] — ${schedule}${tagged}${evt.actionable ? " (actionable)" : ""}`;
     }).join("\n");
+  }
+
+  if (toolUse.name === "tag_event") {
+    const { event_id, contact_name } = toolUse.input as { event_id: string; contact_name: string };
+    if (!event_id || !contact_name) return "Need both event_id and contact_name.";
+    const cal = loadCalendar();
+    const evt = cal.events.find(e => e.id === event_id);
+    if (!evt) return `Event ${event_id} not found.`;
+
+    // Build a set of all known contacts across all events
+    const knownContacts = new Map<string, { jid: string; name: string }>();
+    for (const e of cal.events) {
+      for (const u of e.taggedUsers) {
+        knownContacts.set(u.name.toLowerCase(), u);
+      }
+    }
+
+    // Find by case-insensitive partial match
+    const searchName = contact_name.trim().toLowerCase();
+    let match: { jid: string; name: string } | undefined;
+    for (const [name, contact] of knownContacts) {
+      if (name === searchName || name.includes(searchName)) {
+        match = contact;
+        break;
+      }
+    }
+
+    if (!match) {
+      const names = [...knownContacts.values()].map(c => c.name);
+      return names.length === 0
+        ? "No known contacts. A contact must be shared via WhatsApp contact card first (using /event tag <id>)."
+        : `Contact "${contact_name}" not found. Known contacts: ${names.join(", ")}`;
+    }
+
+    if (evt.taggedUsers.some(u => u.jid === match!.jid)) {
+      return `${match.name} is already tagged to "${evt.title}".`;
+    }
+
+    evt.taggedUsers.push({ jid: match.jid, name: match.name });
+    saveCalendar(cal);
+    console.log(`[calendar] Tool tagged ${match.name} to event "${evt.title}" [${event_id}]`);
+    return `Tagged ${match.name} to "${evt.title}".`;
   }
 
   if (toolUse.name === "forget_fact") {
