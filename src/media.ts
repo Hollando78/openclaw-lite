@@ -1,7 +1,7 @@
 import { downloadMediaMessage, type WAMessage } from "@whiskeysockets/baileys";
 import mammoth from "mammoth";
 import * as path from "path";
-import type { ImageContent, DocumentContent } from "./config.js";
+import { CONFIG, type ImageContent, type DocumentContent } from "./config.js";
 
 // ============================================================================
 // Image Processing
@@ -126,4 +126,67 @@ export function estimateDocumentTokens(doc: DocumentContent): number {
     case "text": return Math.ceil(doc.data.length * 0.25);
     case "image": return 1600;
   }
+}
+
+// ============================================================================
+// Audio / Voice Note Processing
+// ============================================================================
+
+const AUDIO_SIZE_LIMIT = 25 * 1024 * 1024; // 25 MB (Whisper API limit)
+
+export type AudioContent = { buffer: Buffer; mimeType: string; seconds: number };
+
+export async function downloadAudio(msg: WAMessage): Promise<AudioContent | string> {
+  const audioMsg = msg.message?.audioMessage;
+  if (!audioMsg) return "Could not read audio message.";
+
+  const fileSize = Number(audioMsg.fileLength || 0);
+  if (fileSize > AUDIO_SIZE_LIMIT) {
+    return `That voice note is too large (${(fileSize / 1024 / 1024).toFixed(1)}MB). Max is 25MB.`;
+  }
+
+  try {
+    const buffer = await downloadMediaMessage(msg, "buffer", {});
+    const mimeType = audioMsg.mimetype || "audio/ogg";
+    const seconds = Number(audioMsg.seconds || 0);
+    return { buffer: buffer as Buffer, mimeType, seconds };
+  } catch (err) {
+    console.error("[audio] Failed to download:", err);
+    return "Failed to download the voice note.";
+  }
+}
+
+export async function transcribeAudio(buffer: Buffer, mimeType: string): Promise<string> {
+  if (!CONFIG.openaiApiKey) {
+    throw new Error("OPENAI_API_KEY not set");
+  }
+
+  // Determine file extension from mime type
+  const ext = mimeType.includes("ogg") ? "ogg"
+    : mimeType.includes("mp4") ? "m4a"
+    : mimeType.includes("mpeg") ? "mp3"
+    : mimeType.includes("webm") ? "webm"
+    : mimeType.includes("wav") ? "wav"
+    : "ogg";
+
+  const formData = new FormData();
+  const blob = new Blob([new Uint8Array(buffer)], { type: mimeType });
+  formData.append("file", blob, `audio.${ext}`);
+  formData.append("model", "whisper-1");
+
+  const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${CONFIG.openaiApiKey}`,
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Whisper API error ${response.status}: ${errorText}`);
+  }
+
+  const data = await response.json() as { text: string };
+  return data.text;
 }

@@ -61,6 +61,9 @@ export const CONFIG = {
   // GitHub integration (optional)
   githubToken: process.env.GITHUB_TOKEN || "",
   githubOwner: process.env.GITHUB_OWNER || "",
+
+  // OpenAI API key (optional - for Whisper voice note transcription)
+  openaiApiKey: process.env.OPENAI_API_KEY || "",
 };
 
 // Set system timezone if configured (must be before any Date usage)

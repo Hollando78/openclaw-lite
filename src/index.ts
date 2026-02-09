@@ -19,7 +19,7 @@ import * as fs from "fs";
 import * as path from "path";
 
 import { CONFIG, status, addError, getClient, setSendMessageFn, type MediaContent } from "./config.js";
-import { downloadImage, downloadDocument, estimateDocumentTokens } from "./media.js";
+import { downloadImage, downloadDocument, estimateDocumentTokens, downloadAudio, transcribeAudio } from "./media.js";
 import { buildSystemPrompt } from "./soul.js";
 import { addToSession, compressHistoryIfNeeded, getCompressedHistory, loadSession } from "./session.js";
 import { buildMemoryContext, updateMemoryIfNeeded } from "./memory.js";
@@ -561,11 +561,12 @@ async function startWhatsApp(): Promise<void> {
         continue;
       }
 
-      // Extract text, image, and document content
+      // Extract text, image, document, and audio content
       const imageMessage = msg.message?.imageMessage;
       const docMessage =
         msg.message?.documentMessage ||
         (msg.message as any)?.documentWithCaptionMessage?.message?.documentMessage;
+      const audioMessage = msg.message?.audioMessage;
 
       let text =
         msg.message.conversation ||
@@ -588,12 +589,15 @@ async function startWhatsApp(): Promise<void> {
 
       const hasImage = !!imageMessage;
       const hasDocument = !!docMessage;
+      const hasAudio = !!audioMessage;
 
       // Skip if no text AND no media
-      if (!text && !hasImage && !hasDocument) continue;
+      if (!text && !hasImage && !hasDocument && !hasAudio) continue;
 
       status.messagesReceived++;
-      const mediaLabel = hasDocument
+      const mediaLabel = hasAudio
+        ? `[Voice${audioMessage?.seconds ? ` ${audioMessage.seconds}s` : ""}]`
+        : hasDocument
         ? `[Doc: ${docMessage?.fileName || "file"}]`
         : hasImage ? "[Image]" : "";
       status.lastMessage = {
@@ -646,6 +650,37 @@ async function startWhatsApp(): Promise<void> {
             await sock.sendMessage(chatId, {
               text: "🦞 That document looks large and would use up most of my remaining thinking budget for today. Could you ask me about specific parts instead, or send a smaller excerpt?",
             });
+            continue;
+          }
+        }
+
+        // Transcribe voice note if present
+        if (hasAudio) {
+          if (!CONFIG.openaiApiKey) {
+            await sock.sendMessage(chatId, { text: "🦞 Voice notes require an OpenAI API key for transcription. Set OPENAI_API_KEY in .env" });
+            continue;
+          }
+          console.log(`[voice] Downloading voice note from ${senderId} (${audioMessage?.seconds || "?"}s)`);
+          const audioResult = await downloadAudio(msg);
+          if (typeof audioResult === "string") {
+            await sock.sendMessage(chatId, { text: `🦞 ${audioResult}` });
+            continue;
+          }
+          console.log(`[voice] Transcribing ${(audioResult.buffer.length / 1024).toFixed(1)}KB audio...`);
+          try {
+            const transcription = await transcribeAudio(audioResult.buffer, audioResult.mimeType);
+            if (!transcription || transcription.trim().length === 0) {
+              await sock.sendMessage(chatId, { text: "🦞 I couldn't make out any words in that voice note." });
+              continue;
+            }
+            console.log(`[voice] Transcribed: "${transcription.slice(0, 80)}${transcription.length > 80 ? "..." : ""}"`);
+            // Prefix so Claude knows this was spoken, not typed
+            text = `[Voice note]: ${transcription}`;
+            // Rough token budget tracking for Whisper usage
+            lizardBrain.tokens.used += 100;
+          } catch (err) {
+            console.error("[voice] Transcription failed:", err);
+            await sock.sendMessage(chatId, { text: "🦞 Sorry, I couldn't transcribe that voice note." });
             continue;
           }
         }
