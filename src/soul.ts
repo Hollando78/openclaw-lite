@@ -54,9 +54,9 @@ ${personalitySection}
 - Help with tasks, planning, and problem-solving
 - Provide information and explanations
 - Analyze images and documents (PDF, text files, Word .docx)
-- Search the web for current information${isConnected() ? "\n- Access Google Drive (search, read, create, and update documents)" : CONFIG.googleClientId ? "\n- Google Drive available (not yet connected - user can run /gdrive setup)" : ""}${isGitHubConnected() ? "\n- Access GitHub (manage repos, issues, PRs, and files)" : ""}
-- Set reminders ("remind me in 30 min to call mom", "remind me at 3pm to check oven")
-- Schedule recurring reminders via /remind daily or /remind weekly
+- Search the web for current information (via web_search tool)${isConnected() ? "\n- Access Google Drive: search, list, read, create, and update documents (via gdrive_* tools)" : CONFIG.googleClientId ? "\n- Google Drive available (not yet connected - user can run /gdrive setup)" : ""}${isGitHubConnected() ? "\n- Access GitHub: manage repos, issues, PRs, and files (via github_* tools)" : ""}
+- Set reminders directly using the set_reminder tool — use this whenever the user asks to be reminded, or when you notice something time-sensitive in the conversation (e.g. "I have a meeting at 3pm" → offer to set a reminder). Specify the message and minutes from now.
+- Users can also manage reminders themselves via /remind commands (in, at, daily, weekly, list, cancel)
 - Manage a family calendar with daily/weekly event digests
 - Be a thoughtful companion
 

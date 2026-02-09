@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { CONFIG } from "./config.js";
+import { addReminder, formatDuration } from "./lizard-brain.js";
 import {
   isConnected, searchFiles, listFiles, readDocAsText,
   createDoc, updateDoc, extractFileId, type DriveFile,
@@ -67,6 +68,19 @@ const webSearchTool: Anthropic.Tool = {
       query: { type: "string", description: "The search query" },
     },
     required: ["query"],
+  },
+};
+
+const setReminderTool: Anthropic.Tool = {
+  name: "set_reminder",
+  description: "Set a reminder for the user. Use this when the user asks to be reminded about something, or when it would be helpful to offer a reminder (e.g. 'I have a meeting at 3pm' → offer to remind them). The reminder will fire in the current chat.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      message: { type: "string", description: "The reminder message (e.g. 'Call the doctor')" },
+      minutes: { type: "number", description: "Minutes from now until the reminder fires" },
+    },
+    required: ["message", "minutes"],
   },
 };
 
@@ -265,14 +279,22 @@ const githubTools: Anthropic.Tool[] = [
 // ============================================================================
 
 export function getEnabledTools(): Anthropic.Tool[] {
-  const tools: Anthropic.Tool[] = [];
+  const tools: Anthropic.Tool[] = [setReminderTool];
   if (CONFIG.tavilyApiKey) tools.push(webSearchTool);
   if (isConnected()) tools.push(...gdriveTools);
   if (isGitHubConnected()) tools.push(...githubTools);
   return tools;
 }
 
-export async function executeToolCall(toolUse: Anthropic.ToolUseBlock): Promise<string> {
+export async function executeToolCall(toolUse: Anthropic.ToolUseBlock, chatId: string): Promise<string> {
+  if (toolUse.name === "set_reminder") {
+    const { message, minutes } = toolUse.input as { message: string; minutes: number };
+    if (!message || !minutes || minutes <= 0) return "Invalid reminder: need a message and positive number of minutes.";
+    const reminder = addReminder(chatId, message, minutes);
+    console.log(`[reminder] Tool set reminder #${reminder.id}: "${message}" in ${minutes}min for ${chatId}`);
+    return `Reminder #${reminder.id} set: "${message}" in ${formatDuration(minutes)}.`;
+  }
+
   if (toolUse.name === "web_search") {
     const query = (toolUse.input as { query: string }).query;
     console.log(`[search] Searching: ${query}`);

@@ -188,7 +188,7 @@ async function chat(chatId: string, userMessage: string, media?: MediaContent): 
 
       if (!toolUse) break;
 
-      const toolResult = await executeToolCall(toolUse);
+      const toolResult = await executeToolCall(toolUse, chatId);
 
       // Accumulate tool conversation history (so Claude sees prior tool results)
       toolMessages.push(
