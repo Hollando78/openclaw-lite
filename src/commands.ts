@@ -8,6 +8,7 @@ import {
 import { formatUptime } from "./kiosk.js";
 import {
   pendingContactTag, setPendingContactTag,
+  pendingContactAdd, setPendingContactAdd,
   loadCalendar, saveCalendar, generateEventId,
   DAY_NAMES_SHORT, DAY_NAMES_FULL, DAY_MAP,
 } from "./calendar.js";
@@ -71,7 +72,13 @@ Or just say: "remind me in 30 min to..."
 /event tag <id> - Tag a contact to event
 /event digest daily HH:MM
 /event digest weekly Day HH:MM
-/skip - Cancel contact tagging
+/skip - Cancel contact tagging/adding
+
+*Contacts*
+/contacts - List known contacts
+/contacts add - Add a contact (share a contact card)
+/contacts remove <name> - Remove a contact
+/contacts rename <old> to <new> - Rename a contact
 ${CONFIG.googleClientId ? `
 *Google Drive*
 /gdrive setup - Connect Google Drive
@@ -459,10 +466,83 @@ Or just say: "remind me in 30 min to call mom"`;
       return "Usage:\n`/github status` - Check GitHub connection";
     }
 
+    case "contacts":
+    case "contact": {
+      const subCmd = args[0]?.toLowerCase();
+
+      // /contacts or /contacts list
+      if (!subCmd || subCmd === "list") {
+        const cal = loadCalendar();
+        if (cal.contacts.length === 0) {
+          return "📇 No contacts yet. Use `/contacts add` then share a WhatsApp contact card.";
+        }
+        let output = "📇 *Contacts*\n\n";
+        for (const c of cal.contacts) {
+          output += `• ${c.name} (${c.jid.replace(/@.*$/, "")})\n`;
+        }
+        return output;
+      }
+
+      // /contacts add
+      if (subCmd === "add") {
+        setPendingContactAdd(chatId);
+        return "Send me a contact card to add, or /skip to cancel.";
+      }
+
+      // /contacts remove <name>
+      if (subCmd === "remove" || subCmd === "delete") {
+        const name = args.slice(1).join(" ").trim();
+        if (!name) return "Usage: `/contacts remove <name>`";
+        const cal = loadCalendar();
+        const searchName = name.toLowerCase();
+        const idx = cal.contacts.findIndex(c => c.name.toLowerCase() === searchName || c.name.toLowerCase().includes(searchName));
+        if (idx === -1) return `Contact "${name}" not found. Use \`/contacts\` to see all contacts.`;
+        const removed = cal.contacts.splice(idx, 1)[0];
+        saveCalendar(cal);
+        return `🗑️ Removed contact "${removed.name}".`;
+      }
+
+      // /contacts rename <old> to <new>
+      if (subCmd === "rename") {
+        const full = args.slice(1).join(" ");
+        const toIdx = full.toLowerCase().indexOf(" to ");
+        if (toIdx === -1) return "Usage: `/contacts rename <old name> to <new name>`";
+        const oldName = full.slice(0, toIdx).trim();
+        const newName = full.slice(toIdx + 4).trim();
+        if (!oldName || !newName) return "Usage: `/contacts rename <old name> to <new name>`";
+
+        const cal = loadCalendar();
+        const searchName = oldName.toLowerCase();
+        const contact = cal.contacts.find(c => c.name.toLowerCase() === searchName || c.name.toLowerCase().includes(searchName));
+        if (!contact) return `Contact "${oldName}" not found. Use \`/contacts\` to see all contacts.`;
+
+        const oldDisplayName = contact.name;
+        contact.name = newName;
+
+        // Also update taggedUsers across all events with the same JID
+        for (const evt of cal.events) {
+          for (const u of evt.taggedUsers) {
+            if (u.jid === contact.jid) {
+              u.name = newName;
+            }
+          }
+        }
+
+        saveCalendar(cal);
+        return `✏️ Renamed "${oldDisplayName}" to "${newName}".`;
+      }
+
+      return "Usage: `/contacts list|add|remove|rename`\nType `/help` for details.";
+    }
+
     case "skip":
       if (pendingContactTag.has(chatId)) {
         pendingContactTag.delete(chatId);
         return "Skipped contact tagging.";
+      }
+      if (pendingContactAdd.has(chatId)) {
+        pendingContactAdd.delete(chatId);
+        return "Skipped adding contact.";
       }
       return null;
 

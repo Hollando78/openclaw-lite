@@ -33,6 +33,7 @@ import {
 } from "./lizard-brain.js";
 import {
   initCalendar, pendingContactTag, setPendingContactTag, consumePendingContactTag,
+  pendingContactAdd, consumePendingContactAdd, setPendingContactAdd,
   loadCalendar, saveCalendar, parseVCard, vcardToJid,
   processCalendarDigests, collectDueActionableEvents,
 } from "./calendar.js";
@@ -410,6 +411,11 @@ async function startWhatsApp(): Promise<void> {
               pendingContactTag.delete(chatId);
             }
           }
+          for (const [chatId, state] of pendingContactAdd.entries()) {
+            if (Date.now() > state.expiresAt) {
+              pendingContactAdd.delete(chatId);
+            }
+          }
         },
       );
     }
@@ -472,7 +478,9 @@ async function startWhatsApp(): Promise<void> {
 
       if (contactMsg || contactsArrayMsg) {
         const eventId = consumePendingContactTag(chatId);
-        if (!eventId) continue; // No pending tag, ignore contact
+        const isContactAdd = !eventId && consumePendingContactAdd(chatId);
+
+        if (!eventId && !isContactAdd) continue; // No pending state, ignore contact
 
         const contacts: Array<{ vcard: string; displayName: string }> = [];
         if (contactMsg?.vcard) {
@@ -486,36 +494,69 @@ async function startWhatsApp(): Promise<void> {
           }
         }
 
-        const cal = loadCalendar();
-        const evt = cal.events.find(e => e.id === eventId);
-        if (!evt) {
-          await sock.sendMessage(chatId, { text: `Event ${eventId} no longer exists.` });
-          continue;
-        }
-
-        const taggedNames: string[] = [];
-        for (const contact of contacts) {
-          const parsed = parseVCard(contact.vcard);
-          if (!parsed) {
-            await sock.sendMessage(chatId, { text: `Could not parse phone number for ${contact.displayName}. Skipping.` });
+        if (eventId) {
+          // Event tagging flow (existing behavior)
+          const cal = loadCalendar();
+          const evt = cal.events.find(e => e.id === eventId);
+          if (!evt) {
+            await sock.sendMessage(chatId, { text: `Event ${eventId} no longer exists.` });
             continue;
           }
-          const jid = vcardToJid(parsed.phoneNumber);
-          if (!evt.taggedUsers.some(u => u.jid === jid)) {
-            evt.taggedUsers.push({ jid, name: parsed.name });
-            taggedNames.push(parsed.name);
+
+          const taggedNames: string[] = [];
+          for (const contact of contacts) {
+            const parsed = parseVCard(contact.vcard);
+            if (!parsed) {
+              await sock.sendMessage(chatId, { text: `Could not parse phone number for ${contact.displayName}. Skipping.` });
+              continue;
+            }
+            const jid = vcardToJid(parsed.phoneNumber);
+            if (!evt.taggedUsers.some(u => u.jid === jid)) {
+              evt.taggedUsers.push({ jid, name: parsed.name });
+              taggedNames.push(parsed.name);
+            }
           }
-        }
 
-        saveCalendar(cal);
+          saveCalendar(cal);
 
-        if (taggedNames.length > 0) {
-          await sock.sendMessage(chatId, {
-            text: `👤 Tagged ${taggedNames.join(", ")} to "${evt.title}"!\n\nSend another contact to tag more, or /skip to finish.`,
-          });
-          setPendingContactTag(chatId, eventId);
+          if (taggedNames.length > 0) {
+            await sock.sendMessage(chatId, {
+              text: `👤 Tagged ${taggedNames.join(", ")} to "${evt.title}"!\n\nSend another contact to tag more, or /skip to finish.`,
+            });
+            setPendingContactTag(chatId, eventId);
+          } else {
+            await sock.sendMessage(chatId, { text: "No valid contacts were tagged." });
+          }
         } else {
-          await sock.sendMessage(chatId, { text: "No valid contacts were tagged." });
+          // Contact add flow
+          const cal = loadCalendar();
+          const addedNames: string[] = [];
+
+          for (const contact of contacts) {
+            const parsed = parseVCard(contact.vcard);
+            if (!parsed) {
+              await sock.sendMessage(chatId, { text: `Could not parse phone number for ${contact.displayName}. Skipping.` });
+              continue;
+            }
+            const jid = vcardToJid(parsed.phoneNumber);
+            if (!cal.contacts.some(c => c.jid === jid)) {
+              cal.contacts.push({ jid, name: parsed.name });
+              addedNames.push(parsed.name);
+            } else {
+              await sock.sendMessage(chatId, { text: `${parsed.name} is already in contacts.` });
+            }
+          }
+
+          saveCalendar(cal);
+
+          if (addedNames.length > 0) {
+            await sock.sendMessage(chatId, {
+              text: `📇 Added ${addedNames.join(", ")} to contacts!\n\nSend another contact to add more, or /skip to finish.`,
+            });
+            setPendingContactAdd(chatId);
+          } else {
+            await sock.sendMessage(chatId, { text: "No new contacts were added." });
+          }
         }
         continue;
       }

@@ -37,6 +37,26 @@ export function consumePendingContactTag(chatId: string): string | null {
 }
 
 // ============================================================================
+// Pending Contact Add State
+// ============================================================================
+
+export const pendingContactAdd = new Map<string, { expiresAt: number }>();
+
+export function setPendingContactAdd(chatId: string): void {
+  pendingContactAdd.set(chatId, { expiresAt: Date.now() + 120_000 });
+}
+
+export function consumePendingContactAdd(chatId: string): boolean {
+  const pending = pendingContactAdd.get(chatId);
+  if (!pending || Date.now() > pending.expiresAt) {
+    pendingContactAdd.delete(chatId);
+    return false;
+  }
+  pendingContactAdd.delete(chatId);
+  return true;
+}
+
+// ============================================================================
 // Types
 // ============================================================================
 
@@ -56,6 +76,7 @@ export type CalendarEvent = {
 
 export type CalendarData = {
   events: CalendarEvent[];
+  contacts: Array<{ jid: string; name: string }>;
   digestConfig: { dailyTime: string; weeklyDay: number; weeklyTime: string };
   lastDailyDigest: Record<string, number>;
   lastWeeklyDigest: Record<string, number>;
@@ -83,10 +104,14 @@ function getCalendarPath(): string {
 export function loadCalendar(): CalendarData {
   try {
     const data = fs.readFileSync(getCalendarPath(), "utf-8");
-    return JSON.parse(data);
+    const cal = JSON.parse(data);
+    // Backward compat: add contacts array if missing
+    if (!cal.contacts) cal.contacts = [];
+    return cal;
   } catch {
     return {
       events: [],
+      contacts: [],
       digestConfig: { dailyTime: "07:00", weeklyDay: 0, weeklyTime: "18:00" },
       lastDailyDigest: {},
       lastWeeklyDigest: {},

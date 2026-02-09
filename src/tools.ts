@@ -175,6 +175,29 @@ const tagEventTool: Anthropic.Tool = {
   },
 };
 
+const listContactsTool: Anthropic.Tool = {
+  name: "list_contacts",
+  description: "List all known contacts. Shows contacts from the standalone contacts list and from event tags. Use when the user asks about contacts, or before tagging someone to an event.",
+  input_schema: {
+    type: "object" as const,
+    properties: {},
+    required: [],
+  },
+};
+
+const renameContactTool: Anthropic.Tool = {
+  name: "rename_contact",
+  description: "Rename a known contact. Updates the name in the contacts list and across all event tags. Use when the user corrects a contact's name.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      old_name: { type: "string", description: "Current contact name (case-insensitive partial match)" },
+      new_name: { type: "string", description: "New name for the contact" },
+    },
+    required: ["old_name", "new_name"],
+  },
+};
+
 const gdriveTools: Anthropic.Tool[] = [
   {
     name: "gdrive_search",
@@ -370,7 +393,7 @@ const githubTools: Anthropic.Tool[] = [
 // ============================================================================
 
 export function getEnabledTools(): Anthropic.Tool[] {
-  const tools: Anthropic.Tool[] = [setReminderTool, listRemindersTool, cancelReminderTool, createEventTool, listEventsTool, tagEventTool, rememberFactTool, forgetFactTool];
+  const tools: Anthropic.Tool[] = [setReminderTool, listRemindersTool, cancelReminderTool, createEventTool, listEventsTool, tagEventTool, listContactsTool, renameContactTool, rememberFactTool, forgetFactTool];
   if (CONFIG.tavilyApiKey) tools.push(webSearchTool);
   if (isConnected()) tools.push(...gdriveTools);
   if (isGitHubConnected()) tools.push(...githubTools);
@@ -484,11 +507,16 @@ export async function executeToolCall(toolUse: Anthropic.ToolUseBlock, chatId: s
     const evt = cal.events.find(e => e.id === event_id);
     if (!evt) return `Event ${event_id} not found.`;
 
-    // Build a set of all known contacts across all events
+    // Build a set of all known contacts across all events + standalone contacts
     const knownContacts = new Map<string, { jid: string; name: string }>();
+    for (const c of cal.contacts) {
+      knownContacts.set(c.name.toLowerCase(), c);
+    }
     for (const e of cal.events) {
       for (const u of e.taggedUsers) {
-        knownContacts.set(u.name.toLowerCase(), u);
+        if (!knownContacts.has(u.name.toLowerCase())) {
+          knownContacts.set(u.name.toLowerCase(), u);
+        }
       }
     }
 
@@ -539,6 +567,51 @@ export async function executeToolCall(toolUse: Anthropic.ToolUseBlock, chatId: s
     saveMemory(chatId, memory);
     console.log(`[memory] Tool removed fact for ${chatId}: "${removed}"`);
     return `Forgot: "${removed}"`;
+  }
+
+  if (toolUse.name === "list_contacts") {
+    const cal = loadCalendar();
+    // Merge standalone contacts + contacts from event tags
+    const allContacts = new Map<string, { jid: string; name: string }>();
+    for (const c of cal.contacts) {
+      allContacts.set(c.jid, c);
+    }
+    for (const e of cal.events) {
+      for (const u of e.taggedUsers) {
+        if (!allContacts.has(u.jid)) {
+          allContacts.set(u.jid, u);
+        }
+      }
+    }
+    if (allContacts.size === 0) return "No known contacts. Contacts can be added via /contacts add (share a WhatsApp contact card).";
+    return [...allContacts.values()].map(c => `${c.name} (${c.jid.replace(/@.*$/, "")})`).join("\n");
+  }
+
+  if (toolUse.name === "rename_contact") {
+    const { old_name, new_name } = toolUse.input as { old_name: string; new_name: string };
+    if (!old_name || !new_name) return "Need both old_name and new_name.";
+    const cal = loadCalendar();
+    const searchName = old_name.trim().toLowerCase();
+    const contact = cal.contacts.find(c => c.name.toLowerCase() === searchName || c.name.toLowerCase().includes(searchName));
+    if (!contact) {
+      const names = cal.contacts.map(c => c.name);
+      return names.length === 0
+        ? "No contacts to rename."
+        : `Contact "${old_name}" not found. Known contacts: ${names.join(", ")}`;
+    }
+    const oldDisplayName = contact.name;
+    contact.name = new_name.trim();
+    // Propagate rename to all event tags with the same JID
+    for (const evt of cal.events) {
+      for (const u of evt.taggedUsers) {
+        if (u.jid === contact.jid) {
+          u.name = new_name.trim();
+        }
+      }
+    }
+    saveCalendar(cal);
+    console.log(`[contacts] Tool renamed "${oldDisplayName}" to "${new_name.trim()}" for ${chatId}`);
+    return `Renamed "${oldDisplayName}" to "${new_name.trim()}".`;
   }
 
   if (toolUse.name === "web_search") {
