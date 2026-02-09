@@ -666,20 +666,24 @@ async function startWhatsApp(): Promise<void> {
 
           const result = await downloadDocument(msg);
           if (typeof result === "string") {
-            await sock.sendMessage(chatId, { text: `🦞 ${result}` });
-            continue;
-          }
-          mediaContent = { type: "document", document: result.content, fileName: result.fileName };
-          console.log(`[doc] Processed ${result.fileName} (${result.content.kind})`);
+            // Document couldn't be processed for Claude analysis, but the raw buffer
+            // may still be available for save_to_drive. Let text flow through to Claude
+            // instead of hard-stopping, so tools can still work.
+            if (!text) text = `[Document: ${docMessage?.fileName || "file"}] ${result}`;
+            // Don't set mediaContent — Claude won't see doc content, but tools still work
+          } else {
+            mediaContent = { type: "document", document: result.content, fileName: result.fileName };
+            console.log(`[doc] Processed ${result.fileName} (${result.content.kind})`);
 
-          // Token budget pre-check for large documents
-          // Don't block the message — just skip sending doc content to Claude
-          // so save_to_drive and other tools can still work
-          const estimatedTokens = estimateDocumentTokens(result.content);
-          const projectedUsage = (lizardBrain.tokens.used + estimatedTokens) / lizardBrain.tokens.budget;
-          if (projectedUsage > 0.9) {
-            mediaContent = undefined; // drop the heavy content, keep the text flowing
-            if (!text) text = `[Document: ${result.fileName}] (too large to analyze — budget low)`;
+            // Token budget pre-check for large documents
+            // Don't block the message — just skip sending doc content to Claude
+            // so save_to_drive and other tools can still work
+            const estimatedTokens = estimateDocumentTokens(result.content);
+            const projectedUsage = (lizardBrain.tokens.used + estimatedTokens) / lizardBrain.tokens.budget;
+            if (projectedUsage > 0.9) {
+              mediaContent = undefined; // drop the heavy content, keep the text flowing
+              if (!text) text = `[Document: ${result.fileName}] (too large to analyze — budget low)`;
+            }
           }
         }
 
