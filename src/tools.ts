@@ -1,0 +1,452 @@
+import Anthropic from "@anthropic-ai/sdk";
+import { CONFIG } from "./config.js";
+import {
+  isConnected, searchFiles, listFiles, readDocAsText,
+  createDoc, updateDoc, extractFileId, type DriveFile,
+} from "./gdrive.js";
+import {
+  isConnected as isGitHubConnected,
+  listRepos, createRepo, listIssues, createIssue, readIssue,
+  commentOnIssue, closeIssue, listPullRequests, readFile as readGitHubFile,
+  createOrUpdateFile,
+  type GitHubRepo, type GitHubIssue, type GitHubComment, type GitHubPullRequest,
+} from "./github.js";
+
+// ============================================================================
+// Web Search (Tavily)
+// ============================================================================
+
+export async function webSearch(query: string): Promise<string> {
+  if (!CONFIG.tavilyApiKey) {
+    return "Web search not available (no API key configured)";
+  }
+
+  try {
+    const response = await fetch("https://api.tavily.com/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: CONFIG.tavilyApiKey,
+        query,
+        search_depth: "basic",
+        max_results: 5,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Tavily API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const results = data.results || [];
+
+    if (results.length === 0) {
+      return "No results found.";
+    }
+
+    // Format results for Claude
+    return results
+      .map((r: any, i: number) => `[${i + 1}] ${r.title}\n${r.content}\nSource: ${r.url}`)
+      .join("\n\n");
+  } catch (err) {
+    console.error("[search] Error:", err);
+    return `Search failed: ${err}`;
+  }
+}
+
+// ============================================================================
+// Tool Definitions
+// ============================================================================
+
+const webSearchTool: Anthropic.Tool = {
+  name: "web_search",
+  description: "Search the web for current information. Use this when the user asks about recent events, news, current prices, weather, or anything that requires up-to-date information.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      query: { type: "string", description: "The search query" },
+    },
+    required: ["query"],
+  },
+};
+
+const gdriveTools: Anthropic.Tool[] = [
+  {
+    name: "gdrive_search",
+    description: "Search Google Drive for files by name or content. Use when the user asks to find files in their Drive.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        query: { type: "string", description: "Search query (file name or content keywords)" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "gdrive_list",
+    description: "List recent files in Google Drive root or a specific folder.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        folder_id: { type: "string", description: "Optional folder ID (omit for root)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "gdrive_read",
+    description: "Read the text content of a Google Doc. Use when the user asks to read, summarize, or analyze a document.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        file_id: { type: "string", description: "Google Drive file ID or URL" },
+      },
+      required: ["file_id"],
+    },
+  },
+  {
+    name: "gdrive_create_doc",
+    description: "Create a new Google Doc with a title and content.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Document title" },
+        content: { type: "string", description: "Document content (plain text)" },
+      },
+      required: ["title", "content"],
+    },
+  },
+  {
+    name: "gdrive_update_doc",
+    description: "Update an existing Google Doc by appending or replacing content.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        file_id: { type: "string", description: "Google Drive file ID or URL" },
+        content: { type: "string", description: "New content" },
+        mode: { type: "string", enum: ["append", "replace"], description: "'append' to add to end, 'replace' to overwrite" },
+      },
+      required: ["file_id", "content", "mode"],
+    },
+  },
+];
+
+const githubTools: Anthropic.Tool[] = [
+  {
+    name: "github_list_repos",
+    description: "List GitHub repositories for the authenticated user.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        max_results: { type: "number", description: "Max repos to return (default 20)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "github_create_repo",
+    description: "Create a new GitHub repository.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        name: { type: "string", description: "Repository name" },
+        description: { type: "string", description: "Optional description" },
+        private: { type: "boolean", description: "Make repo private (default false)" },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "github_list_issues",
+    description: "List issues in a GitHub repository.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repo name (e.g. 'myrepo' or 'owner/repo')" },
+        state: { type: "string", enum: ["open", "closed", "all"], description: "Issue state (default 'open')" },
+      },
+      required: ["repo"],
+    },
+  },
+  {
+    name: "github_create_issue",
+    description: "Create a new issue in a GitHub repository.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repo name (e.g. 'myrepo' or 'owner/repo')" },
+        title: { type: "string", description: "Issue title" },
+        body: { type: "string", description: "Issue description (markdown)" },
+      },
+      required: ["repo", "title"],
+    },
+  },
+  {
+    name: "github_read_issue",
+    description: "Read an issue and its comments.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repo name (e.g. 'myrepo' or 'owner/repo')" },
+        issue_number: { type: "number", description: "Issue number" },
+      },
+      required: ["repo", "issue_number"],
+    },
+  },
+  {
+    name: "github_comment_issue",
+    description: "Add a comment to an existing issue.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repo name (e.g. 'myrepo' or 'owner/repo')" },
+        issue_number: { type: "number", description: "Issue number" },
+        body: { type: "string", description: "Comment text (markdown)" },
+      },
+      required: ["repo", "issue_number", "body"],
+    },
+  },
+  {
+    name: "github_close_issue",
+    description: "Close an issue.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repo name (e.g. 'myrepo' or 'owner/repo')" },
+        issue_number: { type: "number", description: "Issue number" },
+      },
+      required: ["repo", "issue_number"],
+    },
+  },
+  {
+    name: "github_list_prs",
+    description: "List pull requests in a GitHub repository.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repo name (e.g. 'myrepo' or 'owner/repo')" },
+        state: { type: "string", enum: ["open", "closed", "all"], description: "PR state (default 'open')" },
+      },
+      required: ["repo"],
+    },
+  },
+  {
+    name: "github_read_file",
+    description: "Read a file from a GitHub repository.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repo name (e.g. 'myrepo' or 'owner/repo')" },
+        file_path: { type: "string", description: "Path to file (e.g. 'README.md' or 'src/index.ts')" },
+        branch: { type: "string", description: "Branch name (default 'main')" },
+      },
+      required: ["repo", "file_path"],
+    },
+  },
+  {
+    name: "github_create_or_update_file",
+    description: "Create a new file or update an existing file in a GitHub repository.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        repo: { type: "string", description: "Repo name (e.g. 'myrepo' or 'owner/repo')" },
+        file_path: { type: "string", description: "Path to file" },
+        content: { type: "string", description: "File content" },
+        message: { type: "string", description: "Commit message" },
+        branch: { type: "string", description: "Branch name (default 'main')" },
+      },
+      required: ["repo", "file_path", "content", "message"],
+    },
+  },
+];
+
+// ============================================================================
+// Tool Selection & Execution
+// ============================================================================
+
+export function getEnabledTools(): Anthropic.Tool[] {
+  const tools: Anthropic.Tool[] = [];
+  if (CONFIG.tavilyApiKey) tools.push(webSearchTool);
+  if (isConnected()) tools.push(...gdriveTools);
+  if (isGitHubConnected()) tools.push(...githubTools);
+  return tools;
+}
+
+export async function executeToolCall(toolUse: Anthropic.ToolUseBlock): Promise<string> {
+  if (toolUse.name === "web_search") {
+    const query = (toolUse.input as { query: string }).query;
+    console.log(`[search] Searching: ${query}`);
+    return await webSearch(query);
+  }
+
+  if (toolUse.name === "gdrive_search") {
+    if (!isConnected()) return "Google Drive not connected. Use /gdrive setup first.";
+    try {
+      const { query } = toolUse.input as { query: string };
+      console.log(`[gdrive] Searching: ${query}`);
+      const files = await searchFiles(`fullText contains '${query}' or name contains '${query}'`);
+      return files.length === 0
+        ? "No files found."
+        : files.map((f: DriveFile) => `${f.name} (${f.mimeType}) - ID: ${f.id}${f.webViewLink ? ` - ${f.webViewLink}` : ""}`).join("\n");
+    } catch (err) { return `Drive search failed: ${err}`; }
+  }
+
+  if (toolUse.name === "gdrive_list") {
+    if (!isConnected()) return "Google Drive not connected. Use /gdrive setup first.";
+    try {
+      const { folder_id } = toolUse.input as { folder_id?: string };
+      console.log(`[gdrive] Listing files${folder_id ? ` in folder ${folder_id}` : ""}`);
+      const files = await listFiles(folder_id);
+      return files.length === 0
+        ? "No files found."
+        : files.map((f: DriveFile) => `${f.name} (${f.mimeType}) - ID: ${f.id}${f.size ? ` - ${(Number(f.size) / 1024).toFixed(1)}KB` : ""}`).join("\n");
+    } catch (err) { return `Drive list failed: ${err}`; }
+  }
+
+  if (toolUse.name === "gdrive_read") {
+    if (!isConnected()) return "Google Drive not connected. Use /gdrive setup first.";
+    try {
+      const { file_id } = toolUse.input as { file_id: string };
+      const resolvedId = extractFileId(file_id) || file_id;
+      console.log(`[gdrive] Reading doc: ${resolvedId}`);
+      let text = await readDocAsText(resolvedId);
+      if (text.length > 10000) text = text.slice(0, 10000) + "\n\n... (truncated at 10,000 chars)";
+      return text || "(empty document)";
+    } catch (err) { return `Failed to read document: ${err}`; }
+  }
+
+  if (toolUse.name === "gdrive_create_doc") {
+    if (!isConnected()) return "Google Drive not connected. Use /gdrive setup first.";
+    try {
+      const { title, content } = toolUse.input as { title: string; content: string };
+      console.log(`[gdrive] Creating doc: ${title}`);
+      const result = await createDoc(title, content);
+      return `Created "${title}"\nURL: ${result.url}\nID: ${result.id}`;
+    } catch (err) { return `Failed to create document: ${err}`; }
+  }
+
+  if (toolUse.name === "gdrive_update_doc") {
+    if (!isConnected()) return "Google Drive not connected. Use /gdrive setup first.";
+    try {
+      const { file_id, content, mode } = toolUse.input as { file_id: string; content: string; mode: "append" | "replace" };
+      const resolvedId = extractFileId(file_id) || file_id;
+      console.log(`[gdrive] Updating doc ${resolvedId} (${mode})`);
+      await updateDoc(resolvedId, content, mode);
+      return `Document updated (${mode}).`;
+    } catch (err) { return `Failed to update document: ${err}`; }
+  }
+
+  if (toolUse.name === "github_list_repos") {
+    if (!isGitHubConnected()) return "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env";
+    try {
+      const { max_results } = toolUse.input as { max_results?: number };
+      console.log(`[github] Listing repos`);
+      const repos = await listRepos(max_results);
+      return repos.length === 0
+        ? "No repos found."
+        : repos.map((r: GitHubRepo) => `${r.full_name}${r.private ? " [private]" : ""} - ${r.description || "No description"}\n${r.html_url}`).join("\n\n");
+    } catch (err) { return `Failed to list repos: ${err}`; }
+  }
+
+  if (toolUse.name === "github_create_repo") {
+    if (!isGitHubConnected()) return "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env";
+    try {
+      const input = toolUse.input as { name: string; description?: string; private?: boolean };
+      console.log(`[github] Creating repo: ${input.name}`);
+      const repo = await createRepo(input.name, input.description, input.private);
+      return `Created ${repo.full_name}${repo.private ? " [private]" : ""}\n${repo.html_url}`;
+    } catch (err) { return `Failed to create repo: ${err}`; }
+  }
+
+  if (toolUse.name === "github_list_issues") {
+    if (!isGitHubConnected()) return "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env";
+    try {
+      const { repo, state } = toolUse.input as { repo: string; state?: "open" | "closed" | "all" };
+      console.log(`[github] Listing issues in ${repo}`);
+      const issues = await listIssues(repo, state);
+      return issues.length === 0
+        ? "No issues found."
+        : issues.map((i: GitHubIssue) => `#${i.number} [${i.state}] ${i.title} (by ${i.user.login})\n${i.html_url}`).join("\n\n");
+    } catch (err) { return `Failed to list issues: ${err}`; }
+  }
+
+  if (toolUse.name === "github_create_issue") {
+    if (!isGitHubConnected()) return "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env";
+    try {
+      const { repo, title, body } = toolUse.input as { repo: string; title: string; body?: string };
+      console.log(`[github] Creating issue in ${repo}: ${title}`);
+      const issue = await createIssue(repo, title, body);
+      return `Created issue #${issue.number}: ${issue.title}\n${issue.html_url}`;
+    } catch (err) { return `Failed to create issue: ${err}`; }
+  }
+
+  if (toolUse.name === "github_read_issue") {
+    if (!isGitHubConnected()) return "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env";
+    try {
+      const { repo, issue_number } = toolUse.input as { repo: string; issue_number: number };
+      console.log(`[github] Reading issue #${issue_number} in ${repo}`);
+      const { issue, comments } = await readIssue(repo, issue_number);
+      let result = `#${issue.number} [${issue.state}] ${issue.title}\nBy ${issue.user.login} on ${issue.created_at.slice(0, 10)}\n\n${issue.body || "(no description)"}`;
+      if (comments.length > 0) {
+        result += "\n\nComments:\n" + comments.map((c: GitHubComment) => `@${c.user.login} (${c.created_at.slice(0, 10)}): ${c.body}`).join("\n\n");
+      }
+      if (result.length > 5000) result = result.slice(0, 5000) + "\n\n... (truncated)";
+      return result;
+    } catch (err) { return `Failed to read issue: ${err}`; }
+  }
+
+  if (toolUse.name === "github_comment_issue") {
+    if (!isGitHubConnected()) return "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env";
+    try {
+      const { repo, issue_number, body } = toolUse.input as { repo: string; issue_number: number; body: string };
+      console.log(`[github] Commenting on issue #${issue_number} in ${repo}`);
+      await commentOnIssue(repo, issue_number, body);
+      return `Comment added to issue #${issue_number}.`;
+    } catch (err) { return `Failed to comment: ${err}`; }
+  }
+
+  if (toolUse.name === "github_close_issue") {
+    if (!isGitHubConnected()) return "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env";
+    try {
+      const { repo, issue_number } = toolUse.input as { repo: string; issue_number: number };
+      console.log(`[github] Closing issue #${issue_number} in ${repo}`);
+      await closeIssue(repo, issue_number);
+      return `Issue #${issue_number} closed.`;
+    } catch (err) { return `Failed to close issue: ${err}`; }
+  }
+
+  if (toolUse.name === "github_list_prs") {
+    if (!isGitHubConnected()) return "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env";
+    try {
+      const { repo, state } = toolUse.input as { repo: string; state?: "open" | "closed" | "all" };
+      console.log(`[github] Listing PRs in ${repo}`);
+      const prs = await listPullRequests(repo, state);
+      return prs.length === 0
+        ? "No pull requests found."
+        : prs.map((p: GitHubPullRequest) => `#${p.number} [${p.state}] ${p.title} (by ${p.user.login})\n${p.html_url}`).join("\n\n");
+    } catch (err) { return `Failed to list PRs: ${err}`; }
+  }
+
+  if (toolUse.name === "github_read_file") {
+    if (!isGitHubConnected()) return "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env";
+    try {
+      const { repo, file_path, branch } = toolUse.input as { repo: string; file_path: string; branch?: string };
+      console.log(`[github] Reading ${file_path} from ${repo}`);
+      let content = await readGitHubFile(repo, file_path, branch);
+      if (content.length > 10000) content = content.slice(0, 10000) + "\n\n... (truncated at 10,000 chars)";
+      return content || "(empty file)";
+    } catch (err) { return `Failed to read file: ${err}`; }
+  }
+
+  if (toolUse.name === "github_create_or_update_file") {
+    if (!isGitHubConnected()) return "GitHub not configured. Set GITHUB_TOKEN and GITHUB_OWNER in .env";
+    try {
+      const { repo, file_path, content, message, branch } = toolUse.input as { repo: string; file_path: string; content: string; message: string; branch?: string };
+      console.log(`[github] Writing ${file_path} to ${repo}`);
+      const result = await createOrUpdateFile(repo, file_path, content, message, branch);
+      return `File ${file_path} committed.\n${result.html_url}`;
+    } catch (err) { return `Failed to write file: ${err}`; }
+  }
+
+  return `Unknown tool: ${toolUse.name}`;
+}
