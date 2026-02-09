@@ -1,6 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { CONFIG } from "./config.js";
 import { addReminder, formatDuration } from "./lizard-brain.js";
+import { loadMemory, saveMemory, isValidUserFact, sanitizeFact } from "./memory.js";
+import {
+  loadCalendar, saveCalendar, generateEventId,
+  DAY_MAP, DAY_NAMES_SHORT,
+} from "./calendar.js";
 import {
   isConnected, searchFiles, listFiles, readDocAsText,
   createDoc, updateDoc, extractFileId, type DriveFile,
@@ -81,6 +86,34 @@ const setReminderTool: Anthropic.Tool = {
       minutes: { type: "number", description: "Minutes from now until the reminder fires" },
     },
     required: ["message", "minutes"],
+  },
+};
+
+const createEventTool: Anthropic.Tool = {
+  name: "create_event",
+  description: "Create a calendar event. Use this when the user mentions an appointment, meeting, recurring activity, or any scheduled event. Supports daily, weekly, and one-time events.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      title: { type: "string", description: "Event title (e.g. 'Dentist appointment')" },
+      recurrence: { type: "string", enum: ["daily", "weekly", "once"], description: "How often the event repeats" },
+      time: { type: "string", description: "Time in HH:MM 24-hour format (e.g. '14:30')" },
+      day_of_week: { type: "string", description: "Day of week for weekly events: sun, mon, tue, wed, thu, fri, sat" },
+      date: { type: "string", description: "Date for one-time events in YYYY-MM-DD format (e.g. '2026-03-15')" },
+    },
+    required: ["title", "recurrence", "time"],
+  },
+};
+
+const rememberFactTool: Anthropic.Tool = {
+  name: "remember_fact",
+  description: "Store an important fact about the user for long-term memory. Use this when the user shares personal information worth remembering: their name, preferences, relationships, job, location, important dates, hobbies, etc. Only store facts about the user (the human), not about yourself.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      fact: { type: "string", description: "A concise fact about the user (e.g. 'Has two kids named Max and Lily')" },
+    },
+    required: ["fact"],
   },
 };
 
@@ -279,7 +312,7 @@ const githubTools: Anthropic.Tool[] = [
 // ============================================================================
 
 export function getEnabledTools(): Anthropic.Tool[] {
-  const tools: Anthropic.Tool[] = [setReminderTool];
+  const tools: Anthropic.Tool[] = [setReminderTool, createEventTool, rememberFactTool];
   if (CONFIG.tavilyApiKey) tools.push(webSearchTool);
   if (isConnected()) tools.push(...gdriveTools);
   if (isGitHubConnected()) tools.push(...githubTools);
@@ -293,6 +326,63 @@ export async function executeToolCall(toolUse: Anthropic.ToolUseBlock, chatId: s
     const reminder = addReminder(chatId, message, minutes);
     console.log(`[reminder] Tool set reminder #${reminder.id}: "${message}" in ${minutes}min for ${chatId}`);
     return `Reminder #${reminder.id} set: "${message}" in ${formatDuration(minutes)}.`;
+  }
+
+  if (toolUse.name === "create_event") {
+    const { title, recurrence, time, day_of_week, date } = toolUse.input as {
+      title: string; recurrence: string; time: string; day_of_week?: string; date?: string;
+    };
+    if (!title || !recurrence || !time) return "Invalid event: need title, recurrence, and time.";
+    if (!/^\d{2}:\d{2}$/.test(time)) return "Invalid time format. Use HH:MM (e.g. '14:30').";
+
+    if (recurrence === "weekly") {
+      const dayOfWeek = day_of_week ? DAY_MAP[day_of_week.toLowerCase()] : undefined;
+      if (dayOfWeek === undefined) return "Weekly events need a day_of_week (e.g. 'mon', 'tue').";
+      const id = generateEventId();
+      const cal = loadCalendar();
+      cal.events.push({ id, title, recurrence: "weekly", dayOfWeek, time, taggedUsers: [], createdBy: chatId, createdAt: Date.now(), chatId });
+      saveCalendar(cal);
+      console.log(`[calendar] Tool created weekly event "${title}" ${DAY_NAMES_SHORT[dayOfWeek]} ${time} [${id}]`);
+      return `Event created: "${title}" every ${DAY_NAMES_SHORT[dayOfWeek]} at ${time} [${id}]. Remove with /event remove ${id}`;
+    }
+
+    if (recurrence === "once") {
+      if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return "One-time events need a date in YYYY-MM-DD format.";
+      const id = generateEventId();
+      const cal = loadCalendar();
+      cal.events.push({ id, title, recurrence: "once", date, time, taggedUsers: [], createdBy: chatId, createdAt: Date.now(), chatId });
+      saveCalendar(cal);
+      console.log(`[calendar] Tool created one-time event "${title}" ${date} ${time} [${id}]`);
+      return `Event created: "${title}" on ${date} at ${time} [${id}]. Remove with /event remove ${id}`;
+    }
+
+    if (recurrence === "daily") {
+      const id = generateEventId();
+      const cal = loadCalendar();
+      cal.events.push({ id, title, recurrence: "daily", time, taggedUsers: [], createdBy: chatId, createdAt: Date.now(), chatId });
+      saveCalendar(cal);
+      console.log(`[calendar] Tool created daily event "${title}" ${time} [${id}]`);
+      return `Event created: "${title}" daily at ${time} [${id}]. Remove with /event remove ${id}`;
+    }
+
+    return "Invalid recurrence. Use 'daily', 'weekly', or 'once'.";
+  }
+
+  if (toolUse.name === "remember_fact") {
+    const { fact } = toolUse.input as { fact: string };
+    if (!fact || fact.trim().length === 0) return "No fact provided.";
+    if (!isValidUserFact(fact)) return "That doesn't look like a valid user fact. Only store facts about the user.";
+    const clean = sanitizeFact(fact);
+    const memory = loadMemory(chatId);
+    // Deduplicate: skip if already stored (case-insensitive)
+    if (memory.facts.some(f => f.toLowerCase() === clean.toLowerCase())) {
+      return `Already remembered: "${clean}"`;
+    }
+    memory.facts = [...memory.facts, clean].slice(-20); // Cap at 20 facts
+    memory.lastUpdated = Date.now();
+    saveMemory(chatId, memory);
+    console.log(`[memory] Tool stored fact for ${chatId}: "${clean}"`);
+    return `Remembered: "${clean}"`;
   }
 
   if (toolUse.name === "web_search") {

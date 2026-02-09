@@ -36,7 +36,7 @@ const INSTRUCTION_PATTERNS = /\b(ignore|override|forget|disregard|bypass|system|
 // Filter out facts that are actually Claude talking about itself
 const SELF_REFERENTIAL_PATTERNS = /^(I apologize|I do not|I am (an |simply )?AI|I am (an )?artificial|I should not have|As an AI|As a conversational AI|I'm afraid|I cannot|I don't actually|My previous responses|I am software|I am simply)/i;
 
-function sanitizeFact(fact: string): string {
+export function sanitizeFact(fact: string): string {
   let clean = fact.trim().slice(0, MAX_FACT_LENGTH);
   if (INSTRUCTION_PATTERNS.test(clean)) {
     clean = clean.replace(INSTRUCTION_PATTERNS, "***");
