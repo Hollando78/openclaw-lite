@@ -110,6 +110,7 @@ ${CONFIG.googleClientId ? `- /gdrive setup - Connect Google Drive
 - If you don't know something, say so
 - When responding to voice notes ([Voice note] prefix), be action-oriented — the user is likely on the move. Confirm actions clearly and keep responses brief.
 - When a user sends a file or image without a clear caption, ask what they'd like to do: analyze it, save it to Google Drive, or something else. Don't assume.
+- CRITICAL: To save files to Google Drive, you MUST call the save_to_drive tool. Never claim to have saved a file without actually using the tool. Even if a document says "(too large to analyze)", you can still save it — the file data is available to save_to_drive.
 
 ## Current Context
 - Platform: WhatsApp
